@@ -105,7 +105,9 @@ button{background:none;border:0;padding:0;margin:0;color:inherit;font:inherit;le
 .shareOv[hidden]{display:none;}
 .shareScroll{flex:1;overflow-y:auto;padding:28px 28px calc(env(safe-area-inset-bottom) + 40px);display:flex;flex-direction:column;align-items:center;}
 #shareImg{display:block;width:100%;max-width:420px;border:1px solid var(--rule);box-sizing:border-box;box-shadow:0 10px 40px rgba(0,0,0,.12);}
-.shareHint{margin:20px 0 0;font-size:12px;letter-spacing:0.2em;color:var(--mute);}
+.shareOpt{display:flex;align-items:center;gap:8px;margin:20px 0 0;font-size:12px;letter-spacing:0.15em;color:var(--mute);cursor:pointer;user-select:none;-webkit-user-select:none;}
+.shareOpt input{margin:0;width:14px;height:14px;accent-color:var(--accent);cursor:pointer;}
+.shareHint{margin:14px 0 0;font-size:12px;letter-spacing:0.2em;color:var(--mute);}
 .shareBtns{display:flex;gap:28px;margin-top:18px;font-size:13px;letter-spacing:0.2em;}
 .shareBtns button{padding:8px 0;border-bottom:1px solid var(--rule);}
 .shareBtns button[hidden]{display:none;}
@@ -156,6 +158,7 @@ button{background:none;border:0;padding:0;margin:0;color:inherit;font:inherit;le
     </div>
     <div class="shareScroll">
       <img id="shareImg" alt="分享图片">
+      <label class="shareOpt"><input type="checkbox" id="shareUrlChk">右下角显示网址</label>
       <p class="shareHint">长按或右键保存图片</p>
       <div class="shareBtns">
         <button id="shareSaveBtn">保存图片</button>
@@ -191,6 +194,7 @@ const state = {
   i: Math.min(saved.i || 0, last),
   size: [0, 1, 2].includes(saved.size) ? saved.size : 1,
   dark: saved.dark ?? (matchMedia && matchMedia('(prefers-color-scheme: dark)').matches),
+  surl: saved.surl ?? false,
 };
 let animating = false;
 
@@ -200,7 +204,7 @@ const pageLabel = $('pageLabel'), darkBtn = $('darkBtn'), toc = $('toc'), tocLis
 const shareBtn = $('shareBtn'), shareOv = $('shareOv');
 
 function save() {
-  try { localStorage.setItem(KEY, JSON.stringify({ i: state.i, size: state.size, dark: state.dark })); } catch (e) {}
+  try { localStorage.setItem(KEY, JSON.stringify({ i: state.i, size: state.size, dark: state.dark, surl: state.surl })); } catch (e) {}
 }
 function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
@@ -416,9 +420,11 @@ async function makeShareImage(p) {
   setFont(ctx, 400, SMALL, SMALL * 0.2);
   ctx.fillStyle = mute;
   ctx.fillText(`《${book.title}》 · 微小说`, PAD, y + SMALL / 2);
-  ctx.textAlign = 'right';
-  ctx.fillText('story.shipei.wang', W - PAD, y + SMALL / 2);
-  ctx.textAlign = 'left';
+  if (state.surl) {
+    ctx.textAlign = 'right';
+    ctx.fillText('story.shipei.wang', W - PAD, y + SMALL / 2);
+    ctx.textAlign = 'left';
+  }
 
   // 噪点纹理，对应页面的 .grain
   const g = document.createElement('canvas');
@@ -443,17 +449,27 @@ async function makeShareImage(p) {
   return { blob, name: `照常-${String(s.num).padStart(3, '0')}-${s.title}.png`, title: s.title };
 }
 
+let regenSeq = 0;
+async function regenShare() {
+  const p = pages[state.i];
+  if (p.type !== 'story') return;
+  const my = ++regenSeq;
+  const { blob, name, title } = await makeShareImage(p);
+  if (my !== regenSeq) return; // 连续勾选时只留最后一次
+  if (shareData) URL.revokeObjectURL(shareData.url);
+  shareData = { blob, url: URL.createObjectURL(blob), name, title };
+  $('shareImg').src = shareData.url;
+  const file = new File([blob], name, { type: 'image/png' });
+  $('shareSysBtn').hidden = !(navigator.canShare && navigator.canShare({ files: [file] }));
+}
+
 async function openShare() {
   const p = pages[state.i];
   if (p.type !== 'story' || shareBtn.textContent !== '分享') return;
   shareBtn.textContent = '生成中';
   try {
-    const { blob, name, title } = await makeShareImage(p);
-    if (shareData) URL.revokeObjectURL(shareData.url);
-    shareData = { blob, url: URL.createObjectURL(blob), name, title };
-    $('shareImg').src = shareData.url;
-    const file = new File([blob], name, { type: 'image/png' });
-    $('shareSysBtn').hidden = !(navigator.canShare && navigator.canShare({ files: [file] }));
+    $('shareUrlChk').checked = state.surl;
+    await regenShare();
     shareOv.hidden = false;
   } finally {
     shareBtn.textContent = '分享';
@@ -461,6 +477,10 @@ async function openShare() {
 }
 
 shareBtn.addEventListener('click', e => { e.stopPropagation(); openShare(); });
+$('shareUrlChk').addEventListener('change', e => {
+  state.surl = e.target.checked; save();
+  regenShare();
+});
 $('shareCloseBtn').addEventListener('click', () => { shareOv.hidden = true; });
 $('shareSaveBtn').addEventListener('click', () => {
   if (!shareData) return;
