@@ -18,10 +18,11 @@ const stories = files.map(f => {
   return { title, date: f.slice(0, 10), text };
 });
 
-// 连作：按正典顺序连排成小辑，整块插回最早成员原来的位置，其余篇目不动。
-// 顺序以 CLAUDE.md 的连作档案为准；阅读器据 series 字段生成辑扉、目录分组和篇内「之N」。
+// 连作：按阅读顺序连排成小辑，整块插回最早成员原来的位置，其余篇目不动。
+// 阅读顺序以本清单为准（作者定的，和 CLAUDE.md 档案里的视角排列不是一回事）；
+// 阅读器据 series 字段生成辑扉、目录分组和篇内「之N」。
 const SERIES = [
-  { name: '成年人的浪漫', label: '连作 · 四篇', titles: ['成年人的浪漫', '怕冷', '名字', '备注'] },
+  { name: '成年人的浪漫', label: '连作 · 四篇', titles: ['成年人的浪漫', '名字', '备注', '怕冷'] },
 ];
 let ordered = stories;
 for (const ser of SERIES) {
