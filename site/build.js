@@ -1,24 +1,24 @@
 #!/usr/bin/env node
-// 扫描仓库根目录的 YYYY-MM-DD-标题.md，按文件名（日期升序）生成 site/stories.js。
-// 标题取首行 `# 标题`，日期取文件名前 10 位，其余为正文。
+// 扫描仓库根目录的 NNN-标题.md（三位序号=写作顺序），按序号降序生成 site/stories.js——新篇在最前。
+// 标题取首行 `# 标题`，其余为正文。
 const fs = require('fs');
 const path = require('path');
 
 const root = path.join(__dirname, '..');
 const files = fs.readdirSync(root)
-  .filter(f => /^\d{4}-\d{2}-\d{2}-.+\.md$/.test(f))
-  .sort();
+  .filter(f => /^\d{3}-.+\.md$/.test(f))
+  .sort((a, b) => parseInt(b, 10) - parseInt(a, 10));
 
 const stories = files.map(f => {
   const raw = fs.readFileSync(path.join(root, f), 'utf8').trim();
-  let title = f.slice(11).replace(/\.md$/, '');
+  let title = f.slice(4).replace(/\.md$/, '');
   let text = raw;
   const m = raw.match(/^#\s*(.+?)\s*\n+([\s\S]*)$/);
   if (m) { title = m[1]; text = m[2].trim(); }
-  return { title, date: f.slice(0, 10), text };
+  return { num: parseInt(f, 10), title, text };
 });
 
-// 连作：按阅读顺序连排成小辑，整块插回最早成员原来的位置，其余篇目不动。
+// 连作：按阅读顺序连排成小辑，整块插回（降序列表里）最靠前成员原来的位置，其余篇目不动。
 // 阅读顺序以本清单为准（与 CLAUDE.md 连作档案一致，两处要同步改）；
 // 阅读器据 series 字段生成辑扉、目录分组和篇内「之N」。
 const SERIES = [
@@ -50,7 +50,7 @@ const book = {
   back: '这本书里没有人哭。眼泪在你那儿。',
 };
 
-const out = `// 由 site/build.js 自动生成，不要手改；数据来自仓库根目录的 YYYY-MM-DD-标题.md
+const out = `// 由 site/build.js 自动生成，不要手改；数据来自仓库根目录的 NNN-标题.md
 export const book = ${JSON.stringify(book, null, 2)};
 
 export const stories = ${JSON.stringify(ordered, null, 2)};
