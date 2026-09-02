@@ -23,7 +23,7 @@ const stories = files.map(f => {
 // 阅读器据 series 字段生成辑扉、目录分组和篇内「之N」。
 const SERIES = [
   { name: '成年人的浪漫', label: '连作 · 四篇', titles: ['成年人的浪漫', '名字', '备注', '怕冷'] },
-  { name: '彩礼', label: '连作 · 两篇', titles: ['彩礼', '零头'] },
+  { name: '彩礼', label: '连作 · 四篇', titles: ['彩礼', '嫁妆', '零头', '礼簿'] },
 ];
 let ordered = stories;
 for (const ser of SERIES) {
