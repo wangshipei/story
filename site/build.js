@@ -18,6 +18,31 @@ const stories = files.map(f => {
   return { title, date: f.slice(0, 10), text };
 });
 
+// 连作：按正典顺序连排成小辑，整块插回最早成员原来的位置，其余篇目不动。
+// 顺序以 CLAUDE.md 的连作档案为准；阅读器据 series 字段生成辑扉、目录分组和篇内「之N」。
+const SERIES = [
+  { name: '成年人的浪漫', label: '连作 · 四篇', titles: ['成年人的浪漫', '怕冷', '名字', '备注'] },
+];
+let ordered = stories;
+for (const ser of SERIES) {
+  const members = ser.titles.map(t => {
+    const st = ordered.find(x => x.title === t);
+    if (!st) { console.error(`连作《${ser.name}》缺篇：${t}`); process.exit(1); }
+    return st;
+  });
+  members.forEach((st, k) => {
+    st.series = ser.name;
+    st.seriesLabel = ser.label;
+    st.seriesIndex = k + 1;
+    st.seriesCount = members.length;
+  });
+  const at = Math.min(...members.map(st => ordered.indexOf(st)));
+  const memberSet = new Set(members);
+  const rest = ordered.filter(st => !memberSet.has(st));
+  rest.splice(at, 0, ...members);
+  ordered = rest;
+}
+
 const book = {
   title: '照常',
   front: '天塌下来的那天，红绿灯照常在变。',
@@ -27,7 +52,7 @@ const book = {
 const out = `// 由 site/build.js 自动生成，不要手改；数据来自仓库根目录的 YYYY-MM-DD-标题.md
 export const book = ${JSON.stringify(book, null, 2)};
 
-export const stories = ${JSON.stringify(stories, null, 2)};
+export const stories = ${JSON.stringify(ordered, null, 2)};
 `;
 fs.writeFileSync(path.join(__dirname, 'stories.js'), out);
 console.log(`stories.js 已生成：${stories.length} 篇`);

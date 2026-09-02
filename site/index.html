@@ -89,6 +89,8 @@ button{background:none;border:0;padding:0;margin:0;color:inherit;font:inherit;le
 .tocList{width:100%;max-width:600px;height:max-content;}
 .tocList .edge{display:block;width:100%;text-align:left;padding:12px 0;border-bottom:1px solid var(--rule);color:var(--mute);font-size:14px;letter-spacing:0.15em;}
 .tocList .edge.last{border-bottom:0;}
+.tocList .edge.cur{color:var(--accent);}
+.divider .serName{margin:24px 0 0;font-size:30px;font-weight:600;letter-spacing:0.2em;line-height:1.4;}
 .tocList .row{display:flex;width:100%;align-items:baseline;gap:18px;text-align:left;padding:13px 0;border-bottom:1px solid var(--rule);color:var(--ink);font-size:17px;letter-spacing:0.08em;}
 .tocList .row.cur{color:var(--accent);}
 .tocList .rn{font-size:12px;letter-spacing:0.1em;color:var(--mute);min-width:2.2em;font-variant-numeric:tabular-nums;}
@@ -143,11 +145,22 @@ const SIZES = [16, 18, 21];
 const TAP_TO_FLIP = true;
 const LINE_HEIGHT = 2;
 const n = stories.length;
+const CN = ['', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
+
+// 页序列：封面 + （辑扉插在连作首篇前）36 篇 + 封底；辑扉不计入篇数
+const pages = [{ type: 'cover' }];
+stories.forEach((s, k) => {
+  if (s.series && s.seriesIndex === 1)
+    pages.push({ type: 'divider', name: s.series, label: s.seriesLabel || `连作 · ${s.seriesCount} 篇` });
+  pages.push({ type: 'story', s, num: k + 1 });
+});
+pages.push({ type: 'back' });
+const last = pages.length - 1;
 
 let saved = {};
 try { saved = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) {}
 const state = {
-  i: Math.min(saved.i || 0, n + 1),
+  i: Math.min(saved.i || 0, last),
   size: [0, 1, 2].includes(saved.size) ? saved.size : 1,
   dark: saved.dark ?? (matchMedia && matchMedia('(prefers-color-scheme: dark)').matches),
 };
@@ -163,15 +176,15 @@ function save() {
 function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
 function pageHTML() {
-  const i = state.i;
-  if (i === 0) return `<div class="cover">
+  const p = pages[state.i];
+  if (p.type === 'cover') return `<div class="cover">
     <div class="block"></div>
     <h1>${esc(book.title)}</h1>
     <p class="sub">微小说 · ${n} 篇</p>
     <p class="lede">${esc(book.front)}</p>
     <p class="hint">向左翻页开始阅读 →</p>
   </div>`;
-  if (i === n + 1) return `<div class="backp">
+  if (p.type === 'back') return `<div class="backp">
     <p class="lede">${esc(book.back)}</p>
     <div class="rule40"></div>
     <p class="sub">《${esc(book.title)}》 · 全书完</p>
@@ -180,12 +193,20 @@ function pageHTML() {
       <button data-act="toc">目录</button>
     </div>
   </div>`;
-  const s = stories[i - 1];
+  if (p.type === 'divider') return `<div class="backp divider">
+    <p class="sub" style="margin:0;">${esc(p.label)}</p>
+    <h2 class="serName">${esc(p.name)}</h2>
+    <div class="rule40"></div>
+  </div>`;
+  const s = p.s;
   const fs = SIZES[state.size];
-  const ps = s.text.split(/\n\s*\n/).map(p =>
-    `<p style="font-size:${fs}px;line-height:${LINE_HEIGHT};">${esc(p.trim())}</p>`).join('');
+  const ps = s.text.split(/\n\s*\n/).map(par =>
+    `<p style="font-size:${fs}px;line-height:${LINE_HEIGHT};">${esc(par.trim())}</p>`).join('');
+  const serLine = s.series
+    ? `<div class="num">${esc(s.series)} · 之${CN[s.seriesIndex]}</div>` : '';
   return `<div class="story">
-    <div class="num">${String(i).padStart(2, '0')} / ${String(n).padStart(2, '0')}</div>
+    <div class="num"${s.series ? ' style="margin-bottom:4px;"' : ''}>${String(p.num).padStart(2, '0')} / ${String(n).padStart(2, '0')}</div>
+    ${serLine}
     <h2 style="font-size:${Math.round(fs * 1.55)}px;">${esc(s.title)}</h2>
     ${ps}
   </div>`;
@@ -196,14 +217,17 @@ function render() {
   $('themeColor').content = state.dark ? '#1d1b18' : '#efe9dd';
   page.innerHTML = pageHTML();
   page.scrollTop = 0;
-  fill.style.width = `${(state.i / (n + 1)) * 100}%`;
-  pageLabel.textContent = state.i === 0 ? '封面' : state.i === n + 1 ? '封底' : `${state.i} / ${n}`;
+  fill.style.width = `${(state.i / last) * 100}%`;
+  const p = pages[state.i];
+  pageLabel.textContent =
+    p.type === 'cover' ? '封面' : p.type === 'back' ? '封底' :
+    p.type === 'divider' ? '辑' : `${p.num} / ${n}`;
   darkBtn.textContent = state.dark ? '明' : '暗';
 }
 
 function go(d) {
   const t = state.i + d;
-  if (t < 0 || t > n + 1 || animating) return;
+  if (t < 0 || t > last || animating) return;
   animating = true;
   page.style.transition = 'transform .15s ease-in, opacity .15s ease-in';
   page.style.transform = `translateX(${-22 * d}px)`;
@@ -232,15 +256,19 @@ function jump(t) {
 
 function openToc() {
   const rows = [`<button class="edge" data-jump="0">封面</button>`];
-  stories.forEach((s, k) => {
-    const cur = k + 1 === state.i;
-    rows.push(`<button class="row${cur ? ' cur' : ''}" data-jump="${k + 1}">
-      <span class="rn">${String(k + 1).padStart(2, '0')}</span>
-      <span class="rt">${esc(s.title)}</span>
-      <span class="dot"></span>
-    </button>`);
+  pages.forEach((p, idx) => {
+    if (p.type === 'divider') {
+      rows.push(`<button class="edge${idx === state.i ? ' cur' : ''}" data-jump="${idx}">连作 · ${esc(p.name)}</button>`);
+    } else if (p.type === 'story') {
+      const cur = idx === state.i;
+      rows.push(`<button class="row${cur ? ' cur' : ''}" data-jump="${idx}">
+        <span class="rn">${String(p.num).padStart(2, '0')}</span>
+        <span class="rt">${esc(p.s.title)}</span>
+        <span class="dot"></span>
+      </button>`);
+    }
   });
-  rows.push(`<button class="edge last" data-jump="${n + 1}">封底</button>`);
+  rows.push(`<button class="edge last" data-jump="${last}">封底</button>`);
   tocList.innerHTML = rows.join('');
   toc.hidden = false;
 }

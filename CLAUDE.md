@@ -90,6 +90,7 @@
 
 - 在线阅读站 https://story.shipei.wang ，代码在 `site/`（纯静态：index.html + 由 build.js 从根目录 md 生成的 stories.js），部署在本机 /var/www/story + nginx
 - 新写或改完任何一篇，除了 commit+push，还要跑 `site/deploy.sh` 让网站同步（自动重新生成 stories.js，新篇即时上站）
+- 连作在站上连排成小辑（辑扉页 + 目录分组 + 篇内「之N」），正典顺序登记在 `site/build.js` 的 SERIES 清单；新增连作或调整篇目顺序时要同步更新那份清单再部署
 
 ## 修改时的原则
 
