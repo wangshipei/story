@@ -86,6 +86,11 @@
 - 标题：短名词，取自核心物件或意象（蝴蝶 / 螃蟹 / 打火机），不用解释性标题
 - 一篇一个文件，存本目录，命名 `YYYY-MM-DD-标题.md`，正文以 `# 标题` 开头
 
+## 发布
+
+- 在线阅读站 https://story.shipei.wang ，代码在 `site/`（纯静态：index.html + 由 build.js 从根目录 md 生成的 stories.js），部署在本机 /var/www/story + nginx
+- 新写或改完任何一篇，除了 commit+push，还要跑 `site/deploy.sh` 让网站同步（自动重新生成 stories.js，新篇即时上站）
+
 ## 修改时的原则
 
 - 用户说「情绪值太低」→ 病根通常是只有观察、没有关系。按第一原则去补：私人的线、体面话、冷热对置。不要靠加形容词提情绪
