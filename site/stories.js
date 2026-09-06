@@ -2,7 +2,7 @@
 export const book = {
   "title": "照常",
   "front": "天塌下来的那天，红绿灯照常在变。",
-  "back": "这本书里没有人哭。眼泪在你那儿。"
+  "back": "这本书里没有人哭，也没有人笑出声。哭和笑都在你那儿。"
 };
 
 export const stories = [
