@@ -8,6 +8,11 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8
 export HOME=/home/ubuntu
 export PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
+# cron 不加载 ~/.profile，登录凭据（claude setup-token 生成的长期 token）在那里；只取这一行，不把 token 抄进仓库
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  eval "$(grep -m1 '^export CLAUDE_CODE_OAUTH_TOKEN=' "$HOME/.profile")"
+fi
+[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || { echo "没有 CLAUDE_CODE_OAUTH_TOKEN，请在 ~/.profile 里 export（claude setup-token 生成）" >&2; exit 1; }
 
 REPO=/home/ubuntu/story
 LEDGER=$REPO/ROTATION.md
