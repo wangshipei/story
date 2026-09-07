@@ -205,17 +205,22 @@
 
 ## 发布
 
-- 在线阅读站 https://story.shipei.wang ，代码在 `site/`（纯静态：index.html + 由 build.js 从根目录 md 生成的 stories.js），部署在本机 /var/www/story + nginx
+- 在线阅读站 https://story.shipei.wang ，代码在 `site/`（纯静态：index.html + 由 build.js 从根目录 md 生成的 stories.js），部署在 V4 的 /var/www/story + nginx；Mac 上运行 site/deploy.sh 经 apps2-server SSH 同步静态文件
 - 站上按序号降序排列：**新写的一篇永远排在第一篇**，不要打乱这个顺序
 - 新写或改完任何一篇，除了 commit+push，还要跑 `site/deploy.sh` 让网站同步（自动重新生成 stories.js，新篇即时上站）
 - 连作在站上连排成小辑（辑扉页 + 目录分组 + 篇内「之N」），正典顺序登记在 `site/build.js` 的 SERIES 清单；新增连作或调整篇目顺序时要同步更新那份清单再部署
 
 ## 定时写作
 
-- 每天北京时间 06:00，crontab 跑 `cron/daily.sh`：从 `ROTATION.md` 取最前面两条未写的情绪（一天两篇分属不同大类），用 `claude -p` 按本文件写两篇，登记轮值表、部署、commit、push。日志在 `~/log/story-daily.log`
-- 轮值顺序以 `ROTATION.md` 为正典：想明天写某种情绪，把当前轮里那条挪到最前面；一轮写完脚本自动开下一轮。写完一篇必须把篇名登进 ROTATION.md 和「情绪的谱」的格子，脚本有兜底但只会记篇名
-- 暂停：`crontab -e` 注释掉 `# story-daily` 那行。手动试：`cron/daily.sh --dry-run` 看今天轮到哪两个；`cron/daily.sh` 真跑一次
-- 定时写出来的篇目和手写的一样进正典序号、一样上站；改稿照「修改时的原则」来，情绪格子不动
+- 从 2026-09-08 起由这台 Mac 每天北京时间 06:00 接手，服务器的 `story-daily` crontab 已于 2026-09-07 停用。当天服务器已写过的两篇不会重复生成。
+- macOS LaunchAgent `com.friday.story-daily` 调用 `cron/daily.py --scheduled`，每 5 分钟检查一次；每天 06:00 后最多生成一组两篇，唤醒或重新登录后可补跑当天任务。安装/更新：`python3 cron/install_launchd.py`。
+- 写作仍按 `ROTATION.md` 最前两条未写情绪，用 Claude Opus / xhigh 读取本文件及范本生成，登记轮值、构建、commit、push，经 SSH 发布到 V4，最后用 `/wechat` 对应的 `wxmac` 给「王士沛」发送当天两篇完整正文。
+- 轮值顺序以 `ROTATION.md` 为正典：想下一次写某种情绪，把当前轮里那条挪到最前面；一轮写完自动开下一轮。写完必须登记 ROTATION.md 与「情绪的谱」。
+- 本地开发改动需先提交或妥善暂存，自动写作只在 `main` 且工作区干净时开始；拉取失败、生成中断、篇数/序号/字数不合规会停下保留现场，不发布不发微信。
+- 微信须登录、解锁、有可读主窗口，后台进程须有辅助功能与屏幕录制权限。发送前精确核对聊天名；未就绪时正文落盘，每 5 分钟重试；一旦发送结果不确定就停下待人工核实，防止重复发送。
+- 状态与待发正文：`~/Library/Application Support/story-daily/`；调度日志：`~/Library/Logs/story-daily/launchd.log`；Claude 生成日志在状态目录。具体恢复及权限说明见 `cron/README.md`。
+- 预览轮值：`cron/daily.sh --dry-run`；手动执行：`cron/daily.sh`（当天已完成就跳过）；暂停：`launchctl bootout gui/$(id -u)/com.friday.story-daily`。
+- 定时篇目与手写篇目一样进正典序号、一样上站；改稿照「修改时的原则」来，情绪格子不动。
 
 ## 修改时的原则
 
