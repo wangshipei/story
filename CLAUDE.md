@@ -214,11 +214,11 @@
 
 - 从 2026-09-08 起由这台 Mac 每天北京时间 06:00 接手，服务器的 `story-daily` crontab 已于 2026-09-07 停用。当天服务器已写过的两篇不会重复生成。
 - macOS LaunchAgent `com.friday.story-daily` 调用 `cron/daily.py --scheduled`，每 5 分钟检查一次；每天 06:00 后最多生成一组两篇，唤醒或重新登录后可补跑当天任务。安装/更新：`python3 cron/install_launchd.py`。
-- 写作仍按 `ROTATION.md` 最前两条未写情绪，用 Claude Opus / xhigh 读取本文件及范本生成，登记轮值、构建、commit、push，经 SSH 发布到 V4，最后用 `/wechat` 对应的 `wxmac` 给「王士沛」发送当天两篇完整正文。
+- 写作仍按 `ROTATION.md` 最前两条未写情绪，用 Claude Opus / xhigh 读取本文件及范本生成，登记轮值、构建、commit、push，经 SSH 发布到 V4，最后复用站点原生「分享 → 保存图片」生成两张 PNG，通过 `/wechat` 对应的 `wxmac` 给「王士沛Ronald」发送分享图片，每篇一张。
 - 轮值顺序以 `ROTATION.md` 为正典：想下一次写某种情绪，把当前轮里那条挪到最前面；一轮写完自动开下一轮。写完必须登记 ROTATION.md 与「情绪的谱」。
 - 本地开发改动需先提交或妥善暂存，自动写作只在 `main` 且工作区干净时开始；拉取失败、生成中断、篇数/序号/字数不合规会停下保留现场，不发布不发微信。
 - 微信须登录、解锁、有可读主窗口，后台进程须有辅助功能与屏幕录制权限。发送前精确核对聊天名；未就绪时正文落盘，每 5 分钟重试；一旦发送结果不确定就停下待人工核实，防止重复发送。
-- 状态与待发正文：`~/Library/Application Support/story-daily/`；调度日志：`~/Library/Logs/story-daily/launchd.log`；Claude 生成日志在状态目录。具体恢复及权限说明见 `cron/README.md`。
+- 状态、审阅正文与待发图片：`~/Library/Application Support/story-daily/`；调度日志：`~/Library/Logs/story-daily/launchd.log`；Claude 生成日志在状态目录。具体恢复及权限说明见 `cron/README.md`。
 - 预览轮值：`cron/daily.sh --dry-run`；手动执行：`cron/daily.sh`（当天已完成就跳过）；暂停：`launchctl bootout gui/$(id -u)/com.friday.story-daily`。
 - 定时篇目与手写篇目一样进正典序号、一样上站；改稿照「修改时的原则」来，情绪格子不动。
 

@@ -221,7 +221,7 @@ class Runner:
         if self.changes():
             raise TaskError('拉取后工作区不干净')
         picks, ledger = rotation((self.repo / 'ROTATION.md').read_text(encoding='utf-8'))
-        job = dict(date=self.day, status='generating', delivery='pending', picks=picks,
+        job = dict(date=self.day, status='generating', delivery='pending', delivery_format='images', picks=picks,
                    before=self.files(), base_head=self.git('rev-parse', 'HEAD'))
         self.record(job)  # Intent precedes any generation; a crash must never write again.
         (self.repo / 'ROTATION.md').write_text(ledger, encoding='utf-8')
@@ -286,6 +286,46 @@ class Runner:
             job['status'] = 'published'
             self.record(job)
 
+    def prepare_images(self, job):
+        output_dir = (self.state / 'jobs' / (job['date'] + '-images')).resolve()
+
+        def valid_images(images):
+            if not isinstance(images, list) or len(images) != 2 or not all(isinstance(p, str) for p in images):
+                return False
+            paths = [Path(p) for p in images]
+            if len({p.resolve() for p in paths}) != 2:
+                return False
+            for path in paths:
+                if (not path.is_absolute() or path.resolve().parent != output_dir
+                        or path.suffix.lower() != '.png' or not path.is_file()):
+                    return False
+                with path.open('rb') as stream:
+                    if stream.read(8) != b'\x89PNG\r\n\x1a\n':
+                        return False
+            return True
+
+        if valid_images(job.get('image_files')):
+            return job['image_files']
+        args = ['node', 'cron/render_share.mjs', '--output-dir', str(output_dir)]
+        files = job.get('files', [])
+        if len(files) != 2 or not all(STORY.fullmatch(name) for name in files):
+            raise TaskError('分享卡片需要任务中的两篇小说文件名；请人工检查')
+        for name in files:
+            args.extend(['--story', str(int(name[:3]))])
+        try:
+            result = json.loads(self.run(args, timeout=180))
+            images = result.get('images') if isinstance(result, dict) else None
+            if not valid_images(images):
+                raise TaskError('渲染器未返回两张有效的PNG分享卡片')
+        except (TaskError, OSError, ValueError) as exc:
+            job['error'] = f'分享卡片生成失败，可重试：{exc}'
+            self.record(job)
+            raise TaskError(job['error']) from exc
+        job['image_files'] = images
+        job.pop('error', None)
+        self.record(job)
+        return images
+
     def send(self, job):
         if job.get('delivery') == 'sent':
             job['status'] = 'complete'
@@ -293,14 +333,21 @@ class Runner:
             return
         if job.get('delivery') == 'sending':
             raise TaskError(f'{job["date"]} 微信发送结果不确定，请核实聊天后人工处理；自动重发已停止')
-        message = Path(job['message_file'])
-        if not message.is_file():
-            raise TaskError('待发送正文丢失；请人工检查')
+        args = [sys.executable, str(self.repo / 'cron/wechat_send.py')]
+        delivery_format = job.get('delivery_format', 'text')
+        if delivery_format == 'images':
+            args.extend(['--images', *self.prepare_images(job)])
+        elif delivery_format == 'text':
+            message = Path(job['message_file'])
+            if not message.is_file():
+                raise TaskError('待发送正文丢失；请人工检查')
+            args.append(str(message))
+        else:
+            raise TaskError(f'未知发送格式：{delivery_format}')
         job['delivery'] = 'sending'
         self.record(job)
         try:
-            result = subprocess.run([sys.executable, str(self.repo / 'cron/wechat_send.py'), str(message)],
-                                    cwd=self.repo, env=self.env, timeout=180)
+            result = subprocess.run(args, cwd=self.repo, env=self.env, timeout=180)
         except (OSError, subprocess.TimeoutExpired) as exc:
             job['error'] = type(exc).__name__ + '：发送结果不确定'
             self.record(job)

@@ -30,6 +30,8 @@ class FakeRunner(daily.Runner):
         self.generated_count = 2
         self.generation_failure = False
         self.push_failure = False
+        self.render_failure = False
+        self.render_args = None
 
     def run(self, args, timeout=300, log=None):
         self.calls.append(args[:2])
@@ -43,6 +45,16 @@ class FakeRunner(daily.Runner):
             if self.generation_failure:
                 raise daily.TaskError('Claude failed')
             return ''
+        if args[:2] == ['node', 'cron/render_share.mjs']:
+            self.render_args = args
+            if self.render_failure:
+                raise daily.TaskError('renderer failed')
+            output_dir = Path(args[3])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            images = [output_dir / (number + '.png') for number in args[5::2]]
+            for image in images:
+                image.write_bytes(b'\x89PNG\r\n\x1a\nmock image')
+            return json.dumps({'images': [str(image) for image in images]})
         if args[0] == 'node':
             (self.repo / 'site/stories.js').write_text('built stories')
             return ''
@@ -125,6 +137,10 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(send.call_count, 1)
         self.assertEqual(self.read_job()['status'], 'complete')
         self.assertEqual(self.read_job()['delivery'], 'sent')
+        self.assertEqual(self.read_job()['delivery_format'], 'images')
+        self.assertEqual(send.call_args.args[0][2:], ['--images', *self.read_job()['image_files']])
+        self.assertEqual(self.runner.render_args[-4:], ['--story', '2', '--story', '3'])
+        self.assertEqual(sum(c == ['node', 'cron/render_share.mjs'] for c in self.runner.calls), 1)
         self.assertEqual(sum(c[0] == 'fake-claude' for c in self.runner.calls), 1)
         self.assertIn('2026-09-08 002《门》', (self.repo / 'ROTATION.md').read_text())
         self.assertIn('《窗》', (self.repo / 'CLAUDE.md').read_text())
@@ -152,6 +168,70 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(send.call_count, 1)
         self.assertEqual(self.read_job()['delivery'], 'sending')
         self.assertTrue(Path(self.read_job()['message_file']).is_file())
+
+    def test_renderer_failure_retries_without_new_generation_or_publish(self):
+        self.runner.render_failure = True
+        with self.sender(0) as send:
+            with self.assertRaises(daily.TaskError):
+                self.runner.tick()
+            self.assertEqual(send.call_count, 0)
+            job = self.read_job()
+            self.assertEqual(job['status'], 'published')
+            self.assertEqual(job['delivery'], 'pending')
+            self.runner.render_failure = False
+            self.runner.tick()
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(sum(c[0] == 'fake-claude' for c in self.runner.calls), 1)
+        self.assertEqual(sum(c == ['bash', 'site/deploy.sh'] for c in self.runner.calls), 1)
+        self.assertEqual(self.read_job()['status'], 'complete')
+
+    def test_old_text_job_keeps_text_delivery(self):
+        job = self.runner.start()
+        self.runner.publish(job)
+        job.pop('delivery_format')
+        self.runner.record(job)
+        with self.sender(0) as send:
+            self.runner.tick()
+        self.assertEqual(send.call_args.args[0][2:], [job['message_file']])
+        self.assertNotIn(['node', 'cron/render_share.mjs'], self.runner.calls)
+
+    def test_published_job_can_switch_to_images_without_hash_check(self):
+        job = self.runner.start()
+        self.runner.publish(job)
+        job['delivery_format'] = 'text'
+        with self.sender(0):
+            self.runner.send(job)
+        job.update(status='published', delivery='pending', delivery_format='images')
+        self.runner.record(job)
+        # A later code/docs change must not block rerendering a published story.
+        with (self.repo / 'CLAUDE.md').open('a') as stream:
+            stream.write('Updated delivery instructions\n')
+        with self.sender(0) as send:
+            self.runner.tick()
+        self.assertEqual(send.call_args.args[0][2], '--images')
+        self.assertEqual(sum(c[0] == 'fake-claude' for c in self.runner.calls), 1)
+        self.assertEqual(sum(c == ['bash', 'site/deploy.sh'] for c in self.runner.calls), 1)
+
+    def test_missing_pending_image_is_regenerated(self):
+        with self.sender(75):
+            self.runner.tick()
+        Path(self.read_job()['image_files'][0]).unlink()
+        with self.sender(0):
+            self.runner.tick()
+        self.assertEqual(sum(c == ['node', 'cron/render_share.mjs'] for c in self.runner.calls), 2)
+        self.assertEqual(sum(c[0] == 'fake-claude' for c in self.runner.calls), 1)
+
+    def test_missing_uncertain_image_does_not_regenerate_or_resend(self):
+        with self.sender(1):
+            with self.assertRaises(daily.TaskError):
+                self.runner.tick()
+        Path(self.read_job()['image_files'][0]).unlink()
+        with self.sender(0) as send:
+            with self.assertRaises(daily.TaskError):
+                self.runner.tick()
+        self.assertEqual(send.call_count, 0)
+        self.assertEqual(sum(c == ['node', 'cron/render_share.mjs'] for c in self.runner.calls), 1)
+        self.assertEqual(self.read_job()['delivery'], 'sending')
 
     def test_push_failure_resumes_without_writing(self):
         self.runner.push_failure = True

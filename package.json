@@ -1,0 +1,11 @@
+{
+  "name": "zhaochang-story",
+  "private": true,
+  "scripts": {
+    "build": "node site/build.js",
+    "share": "node cron/render_share.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.63.0"
+  }
+}

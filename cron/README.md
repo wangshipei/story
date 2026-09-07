@@ -10,7 +10,7 @@ launchctl print gui/$(id -u)/com.friday.story-daily
 launchctl bootout gui/$(id -u)/com.friday.story-daily  # 暂停
 ```
 
-依赖本机 Claude 登录、Node、Python 3、Git SSH、`apps2-server` SSH 别名与 `/Users/friday/.local/bin/wxmac`。不需要复制服务器凭据。脚本使用当前账号，不修改 HOME 或系统锁屏设置。运行期间 `caffeinate -i` 防止闲置睡眠，不会解锁电脑。
+依赖本机 Claude 登录、Node、Python 3、Google Chrome、Git SSH、`apps2-server` SSH 别名与 `/Users/friday/.local/bin/wxmac`。不需要复制服务器凭据。脚本使用当前账号，不修改 HOME 或系统锁屏设置。运行期间 `caffeinate -i` 防止闲置睡眠，不会解锁电脑。首次安装运行 `npm ci` 安装锁定版本的 `playwright-core`；渲染器使用独立无头 Chrome，不占用日常浏览器会话，可通过 `STORY_CHROME` 指定可执行文件路径。
 
 本机默认 GitHub 密钥属于其他仓库，不能推送 story。本地仓库使用 V4 已有的 `github-story` 专用密钥中转 Git 连接，配置只存在当前仓库的 `.git/config`；重新克隆或迁移机器时需重新设置：
 
@@ -25,7 +25,7 @@ git config core.sshCommand 'ssh -o BatchMode=yes -o ConnectTimeout=15 apps2-serv
 
 ## 微信
 
-两篇合为一条文字，含日期、标题和完整正文，收件人默认「王士沛」。调用 `/wechat` 的同一 `wxmac` CLI，发送前搜索并精确核对聊天标题。若实际联系人显示名不同，核实后修改 `~/Library/LaunchAgents/com.friday.story-daily.plist` 的 `STORY_WECHAT_CHAT`，重新加载；安装器会保留该值。
+每天发送两张 PNG，每篇一张，收件人默认「王士沛Ronald」。`cron/render_share.mjs` 打开本地站点，操作原生「分享 → 保存图片」生成 1200px 宽的浅色纸纹卡片，保留项目排版，默认不显示网址。调用 `/wechat` 的同一 `wxmac` CLI，发送前搜索并精确核对聊天标题。若实际联系人显示名不同，核实后修改 `~/Library/LaunchAgents/com.friday.story-daily.plist` 的 `STORY_WECHAT_CHAT`，重新加载；安装器会保留该值。
 
 必须保持 Mac 解锁、微信已登录且主窗口可见。调用进程需要辅助功能权限和屏幕录制权限，后者用于核对收件人。可运行 `wxmac doctor --prompt` 按系统提示授权，随后完全重启调用它的 App；后台 Python 的权限也需在 launchd 环境下验证。只读检查：
 
@@ -33,12 +33,19 @@ git config core.sshCommand 'ssh -o BatchMode=yes -o ConnectTimeout=15 apps2-serv
 python3 cron/wechat_send.py --check
 ```
 
-锁屏、缺权限、缺窗口时只保留待发正文，稍后重试。发送启动后的失败或超时不能确定是否已发，会停止自动重发。CLI 返回成功只代表发送动作完成；日志会记录是否在当前屏幕读到全文，不代表对方已读或服务器回执。
+锁屏、缺权限、缺窗口时保留待发图片，稍后重试；图片生成失败或待发图片丢失会重新生成卡片，不会重新写作。发送启动后的失败或超时不能确定是否已发，会停止自动重发。图片通过一次 `wxmac send-file` 粘贴发送。CLI 返回成功只代表发送动作完成，不代表对方已读或服务器回执。旧任务未指定发送格式时仍支持原文字流程。
+
+只生成指定篇目的分享卡片（不发送）：
+
+```bash
+node cron/render_share.mjs --output-dir /tmp/story-share --story 57 --story 58
+```
 
 ## 状态与恢复
 
 - `~/Library/Application Support/story-daily/jobs/YYYY-MM-DD.json`：逐阶段状态。
-- 同目录 `YYYY-MM-DD.txt`：固定的待发正文。
+- 同目录 `YYYY-MM-DD.txt`：留存的审阅正文；新任务不发送此文本。
+- 同目录 `YYYY-MM-DD-images/`：原生分享 PNG；路径记录在任务的 `image_files`，新任务 `delivery_format=images`。
 - 状态目录 `YYYY-MM-DD-claude.log`：生成日志。
 - `~/Library/Logs/story-daily/launchd.log`：调度、校验、发布和微信结果。
 

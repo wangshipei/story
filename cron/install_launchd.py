@@ -29,7 +29,7 @@ def main():
             "PATH": str(Path.home() / ".local/bin") + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             "LANG": "en_US.UTF-8",
             "TZ": "Asia/Shanghai",
-            "STORY_WECHAT_CHAT": "王士沛",
+            "STORY_WECHAT_CHAT": "王士沛Ronald",
         },
         "StandardOutPath": str(logs / "launchd.log"),
         "StandardErrorPath": str(logs / "launchd.log"),
