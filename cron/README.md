@@ -12,6 +12,15 @@ launchctl bootout gui/$(id -u)/com.friday.story-daily  # 暂停
 
 依赖本机 Claude 登录、Node、Python 3、Git SSH、`apps2-server` SSH 别名与 `/Users/friday/.local/bin/wxmac`。不需要复制服务器凭据。脚本使用当前账号，不修改 HOME 或系统锁屏设置。运行期间 `caffeinate -i` 防止闲置睡眠，不会解锁电脑。
 
+本机默认 GitHub 密钥属于其他仓库，不能推送 story。本地仓库使用 V4 已有的 `github-story` 专用密钥中转 Git 连接，配置只存在当前仓库的 `.git/config`；重新克隆或迁移机器时需重新设置：
+
+```bash
+git remote set-url origin git@github-story:wangshipei/story.git
+git config core.sshCommand 'ssh -o BatchMode=yes -o ConnectTimeout=15 apps2-server ssh -o BatchMode=yes -o ConnectTimeout=15'
+```
+
+拉取和推送均依赖 V4 的 SSH 连接；密钥留在 V4，不复制到本地。
+
 开始写作前要求 `main` 分支、工作区干净、`git pull --ff-only` 成功。本地开发中的改动先提交或暂存。Claude 用 Opus / xhigh 按轮值写作，校验通过后构建、提交、推送，再将静态站同步到 V4，最后发送微信。只暂存本次两篇与登记/构建文件。
 
 ## 微信
