@@ -20,6 +20,7 @@ BEIJING = dt.timezone(dt.timedelta(hours=8))
 REPO = Path(__file__).resolve().parents[1]
 STATE = Path.home() / 'Library/Application Support/story-daily'
 STORY = re.compile(r'^\d{3}-.+\.md$')
+JOB = re.compile(r'^\d{4}-\d{2}-\d{2}$')  # Only date-named files are jobs; anything else in jobs/ is ignored.
 
 
 class TaskError(RuntimeError):
@@ -377,7 +378,7 @@ class Runner:
         self.send(job)
 
     def tick(self, scheduled=False):
-        jobs = sorted((self.state / 'jobs').glob('*.json'))
+        jobs = sorted(p for p in (self.state / 'jobs').glob('*.json') if JOB.match(p.stem))
         today_exists = False
         for path in jobs:
             job = json.loads(path.read_text(encoding='utf-8'))

@@ -147,6 +147,15 @@ class DailyTests(unittest.TestCase):
         self.assertIn('清单（选题池）\n\n骄傲（正面）', (self.repo / 'CLAUDE.md').read_text())
         self.assertEqual(self.runner.changes(), set())
 
+    def test_foreign_file_in_jobs_dir_does_not_block_the_day(self):
+        jobs = self.state / 'jobs'
+        jobs.mkdir(parents=True, exist_ok=True)
+        (jobs / '2026-09-07-rewrite.json').write_text(json.dumps({'status': 'complete'}))
+        with self.sender(0) as send:
+            self.runner.tick()
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(self.read_job()['status'], 'complete')
+
     def test_previous_day_message_retried_before_six(self):
         with self.sender(75):
             self.runner.tick()
