@@ -27,6 +27,10 @@ class TaskError(RuntimeError):
     pass
 
 
+def report(message):
+    print(f'[{dt.datetime.now(BEIJING).isoformat(timespec="seconds")}] {message}', file=sys.stderr)
+
+
 def save(path, value):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, name = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)
@@ -366,6 +370,23 @@ class Runner:
         job.pop('error', None)
         self.record(job)
 
+    def stale(self):
+        """Last error of each unreadable job file. Its own damage must not break this read."""
+        try:
+            value = json.loads((self.state / 'broken.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def defer(self, job, text):
+        """Park a stuck job in its own file; report whether this failure repeats the last one."""
+        repeated = job.get('last_error') == text
+        # Separate from job['error']; the state machine reads neither of these two fields.
+        job['last_error'] = text
+        job['failures'] = job.get('failures', 0) + 1 if repeated else 1
+        self.record(job)
+        return repeated
+
     def resume(self, job):
         if job['status'] == 'complete':
             return
@@ -379,14 +400,42 @@ class Runner:
 
     def tick(self, scheduled=False):
         jobs = sorted(p for p in (self.state / 'jobs').glob('*.json') if JOB.match(p.stem))
+        stale, broken = self.stale(), {}
         today_exists = False
         for path in jobs:
-            job = json.loads(path.read_text(encoding='utf-8'))
-            today_exists |= job['date'] == self.day
-            self.resume(job)  # Older unsent jobs are retried even before today's 06:00.
+            # JOB already proved the name is a date: identity comes from the file name, not its
+            # content, so an unreadable file cannot decide whether today's two stories are written.
+            today_exists |= path.stem == self.day
+            job = None
+            try:
+                job = json.loads(path.read_text(encoding='utf-8'))
+                # record() writes by job['date']; a file whose date is not its own name would
+                # overwrite another day. Refuse it instead, and never rewrite the file itself.
+                if not isinstance(job, dict) or job.get('date') != path.stem:
+                    raise TaskError('任务文件损坏或与文件名不符；原样保留，请人工检查')
+                self.resume(job)  # Older unsent jobs are retried even before today's 06:00.
+            except (TaskError, OSError, ValueError, KeyError) as exc:
+                # Today's own job is this run's output; only older jobs are retries to skip.
+                if path.stem == self.day:
+                    raise
+                text = f'{type(exc).__name__}：{exc}'
+                if isinstance(job, dict) and job.get('date') == path.stem:
+                    repeated = self.defer(job, text)  # A stuck job must never block today's two.
+                else:
+                    # No usable job here: keep the damaged file untouched and note it beside them.
+                    broken[path.name], repeated = text, stale.get(path.name) == text
+                # The same failure every five minutes must not bury the rest of the log.
+                if not repeated:
+                    report(f'{path.stem} 任务卡住，保留现场并跳过：{exc}')
+            else:
+                if job.pop('last_error', None) is not None:
+                    job.pop('failures', None)  # A recovered job must not silence its next failure.
+                    self.record(job)
+        if broken != stale:
+            save(self.state / 'broken.json', broken)  # Rebuilt each tick: a repaired file drops out.
         if today_exists or (scheduled and self.now.hour < 6):
             return
-        self.resume(self.start())
+        self.resume(self.start())  # Failure here must reach the caller and the exit code.
 
 
 def main(argv=None):
@@ -407,7 +456,7 @@ def main(argv=None):
             Runner().tick(args.scheduled)
         return 0
     except (TaskError, OSError, ValueError, KeyError) as exc:
-        print(f'[{dt.datetime.now(BEIJING).isoformat(timespec="seconds")}] {exc}', file=sys.stderr)
+        report(exc)
         return 1
 
 

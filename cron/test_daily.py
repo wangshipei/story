@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Recovery tests use temporary git repos and never call Claude, SSH or WeChat."""
+import contextlib
 import datetime as dt
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -253,12 +255,53 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(sum(c[0] == 'fake-claude' for c in self.runner.calls), 1)
         self.assertEqual(self.read_job()['status'], 'complete')
 
-    def test_interrupted_generation_blocks_following_day(self):
-        job = dict(date='2026-09-07', status='generating')
-        self.runner.record(job)
-        with self.assertRaises(daily.TaskError):
+    def test_interrupted_older_job_does_not_block_the_day(self):
+        scene = dict(date='2026-09-07', status='generating')
+        self.runner.record(scene)
+        log = io.StringIO()
+        with self.sender(0) as send, contextlib.redirect_stderr(log):
             self.runner.tick()
-        self.assertEqual(self.runner.calls, [])
+        job = self.read_job('2026-09-07')
+        # The stuck job keeps its scene; only the two log-quieting fields are added.
+        self.assertEqual({k: v for k, v in job.items() if k not in {'last_error', 'failures'}}, scene)
+        self.assertEqual(job['failures'], 1)
+        self.assertEqual(len(log.getvalue().splitlines()), 1)
+        self.assertEqual(sum(c[0] == 'fake-claude' for c in self.runner.calls), 1)
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(self.read_job()['status'], 'complete')
+
+    def test_repeated_failure_is_logged_once(self):
+        self.runner.record(dict(date='2026-09-07', status='generating'))
+        first, second = io.StringIO(), io.StringIO()
+        with self.sender(0):
+            with contextlib.redirect_stderr(first):
+                self.runner.tick()
+            with contextlib.redirect_stderr(second):
+                self.runner.tick()
+        self.assertEqual(len(first.getvalue().splitlines()), 1)
+        self.assertEqual(second.getvalue(), '')
+        self.assertEqual(self.read_job('2026-09-07')['failures'], 2)
+        self.assertEqual(sum(c[0] == 'fake-claude' for c in self.runner.calls), 1)
+
+    def test_broken_job_file_does_not_block_the_day(self):
+        jobs = self.state / 'jobs'
+        jobs.mkdir(parents=True, exist_ok=True)
+        damaged = {'2026-09-05.json': 'not json at all',
+                   '2026-09-06.json': json.dumps({'status': 'generated'})}  # the missing-date case
+        for name, text in damaged.items():
+            (jobs / name).write_text(text)
+        log = io.StringIO()
+        with self.sender(0) as send, contextlib.redirect_stderr(log):
+            self.runner.tick()
+        self.assertEqual(len(log.getvalue().splitlines()), 2)
+        for name, text in damaged.items():
+            self.assertEqual((jobs / name).read_text(), text)  # left untouched as evidence
+        self.assertEqual(set(json.loads((self.state / 'broken.json').read_text())), set(damaged))
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(self.read_job()['status'], 'complete')
+        with self.sender(0), contextlib.redirect_stderr(log):
+            self.runner.tick()
+        self.assertEqual(len(log.getvalue().splitlines()), 2)  # same two lines: nothing reprinted
 
     def test_lock_excludes_second_runner(self):
         with daily.locked(self.state) as first:
