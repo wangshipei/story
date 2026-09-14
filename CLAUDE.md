@@ -207,7 +207,7 @@
 
 ## 发布
 
-- 在线阅读站 https://story.shipei.wang ，代码在 `site/`（纯静态：index.html + 由 build.js 从根目录 md 生成的 stories.js），部署在 V4 的 /var/www/story + nginx；Mac 上运行 site/deploy.sh 经 apps2-server SSH 同步静态文件
+- 在线阅读站 https://story.shipei.wang ，代码在 `site/`（纯静态：index.html + 由 build.js 从根目录 md 生成的 stories.js），部署在 V1（8.133.23.166）的 /var/www/story + Apache vhost `/etc/httpd/conf.d/story.shipei.wang.conf`；Mac 上运行 site/deploy.sh 经 `v1` SSH 别名同步静态文件。证书由 certbot webroot 自动续期
 - 站上按序号降序排列：**新写的一篇永远排在第一篇**，不要打乱这个顺序
 - 新写或改完任何一篇，除了 commit+push，还要跑 `site/deploy.sh` 让网站同步（自动重新生成 stories.js，新篇即时上站）
 - 连作在站上连排成小辑（辑扉页 + 目录分组 + 篇内「之N」），正典顺序登记在 `site/build.js` 的 SERIES 清单；新增连作或调整篇目顺序时要同步更新那份清单再部署
@@ -217,7 +217,7 @@
 - 从 2026-09-08 起由这台 Mac 每天北京时间 06:00 接手，服务器的 `story-daily` crontab 已于 2026-09-07 停用。当天服务器已写过的两篇不会重复生成。
 - macOS LaunchAgent `com.friday.story-daily` 调用 `cron/daily.py --scheduled`，每 5 分钟检查一次；每天 06:00 后最多生成一组两篇，唤醒或重新登录后可补跑当天任务。安装/更新：`python3 cron/install_launchd.py`。
 - **定时任务不在主工作区干活**：它有自己的 detached git worktree `~/Library/Application Support/story-daily/worktree`，每天开工前 `fetch` + `reset --hard origin/main`，写完直接 push 到 main。代码仍读主工作区的 `cron/`（改了立刻生效，不必先 push），干哪个仓库由 `STORY_REPO` 指定。所以主工作区随便改、随便脏、随便待在别的分支，都不再挡住定时任务；反过来定时任务也不会动主工作区一个字节。`cron/daily.sh --repo` 打印它干活的目录，worktree 被误删下一轮自动重建。
-- 写作仍按 `ROTATION.md` 最前两条未写情绪，用 Claude Opus / xhigh 读取本文件及范本生成，登记轮值、构建、commit、push，经 SSH 发布到 V4，最后复用站点原生「分享 → 保存图片」生成两张 PNG，通过 `/wechat` 对应的 `wxmac` 给「王士沛Ronald」发送分享图片，每篇一张。
+- 写作仍按 `ROTATION.md` 最前两条未写情绪，用 Claude Opus / xhigh 读取本文件及范本生成，登记轮值、构建、commit、push，经 SSH 发布到 V1，最后复用站点原生「分享 → 保存图片」生成两张 PNG，通过 `/wechat` 对应的 `wxmac` 给「王士沛Ronald」发送分享图片，每篇一张。
 - 轮值顺序以 `ROTATION.md` 为正典：想下一次写某种情绪，把当前轮里那条挪到最前面；一轮写完自动开下一轮。写完必须登记 ROTATION.md 与「情绪的谱」。
 - 手写的稿子写完要 push：worktree 只看 `origin/main`，看不见本地未推送的篇目，序号会撞。真撞上时 push 会被拒（绝不强推），任务停下保留现场等人工处理。
 - 开工条件只管 worktree：它自己干净、没有未推送的提交；fetch 失败、生成中断、篇数/序号/字数不合规会停下保留现场，不发布不发微信。`generated` 状态（两篇已写、尚未提交）之后的恢复绝不 reset，只有当天开工那一步才同步 `origin/main`。
