@@ -10,18 +10,27 @@ launchctl print gui/$(id -u)/com.friday.story-daily
 launchctl bootout gui/$(id -u)/com.friday.story-daily  # 暂停
 ```
 
-依赖本机 Claude 登录、Node、Python 3、Google Chrome、Git SSH、`v1` SSH 别名（站点发布）、`apps2-server` SSH 别名（Git 中转）与 `/Users/friday/.local/bin/wxmac`。不需要复制服务器凭据。脚本使用当前账号，不修改 HOME 或系统锁屏设置。运行期间 `caffeinate -i` 防止闲置睡眠，不会解锁电脑。渲染器使用独立无头 Chrome，不占用日常浏览器会话，可通过 `STORY_CHROME` 指定可执行文件路径。
+依赖本机 Claude 登录、Node、Python 3、Google Chrome、Git SSH、`v1` SSH 别名（站点发布）与 `/Users/friday/.local/bin/wxmac`。Git 和站点发布都不再经过 V4。脚本使用当前账号，不修改 HOME 或系统锁屏设置。运行期间 `caffeinate -i` 防止闲置睡眠，不会解锁电脑。渲染器使用独立无头 Chrome，不占用日常浏览器会话，可通过 `STORY_CHROME` 指定可执行文件路径。
 
 `node_modules` 不进版本库，而 worktree 是新目录，所以 `--bootstrap` 会在 worktree 里跑 `npm ci` 安装锁定版本的 `playwright-core`，并把 `package-lock.json` 的摘要写进 `node_modules/.story-install`；`git reset --hard` 不动被忽略的文件，因此只在依赖缺失或锁文件变化时重装。主工作区的 `node_modules` 与它互不相干。
 
-本机默认 GitHub 密钥属于其他仓库，不能推送 story。本地仓库使用 V4 已有的 `github-story` 专用密钥中转 Git 连接，配置只存在当前仓库的 `.git/config`；重新克隆或迁移机器时需重新设置：
+本机默认 GitHub 密钥属于其他仓库（`inaitex_ios` 的 deploy key），不能推送 story。story 有自己的 deploy key `~/.ssh/story_deploy`，经 `~/.ssh/config` 的 `github-story` 别名直连 GitHub——2026-09-14 从 V4 挪到本机，不再中转，`core.sshCommand` 已清空。重新克隆或迁移机器时需重新设置：
 
 ```bash
 git remote set-url origin git@github-story:wangshipei/story.git
-git config core.sshCommand 'ssh -o BatchMode=yes -o ConnectTimeout=15 apps2-server ssh -o BatchMode=yes -o ConnectTimeout=15'
 ```
 
-拉取和推送均依赖 V4 的 SSH 连接；密钥留在 V4，不复制到本地。
+并在 `~/.ssh/config` 里补上别名（密钥要 `chmod 600`）：
+
+```
+Host github-story
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/story_deploy
+  IdentitiesOnly yes
+```
+
+自检：`ssh -T git@github-story` 回 `Hi wangshipei/story!` 即可。密钥无 passphrase，launchd 后台无 ssh-agent 也能用。
 
 ## 独立 worktree
 
