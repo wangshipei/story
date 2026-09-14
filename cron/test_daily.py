@@ -5,6 +5,7 @@ import datetime as dt
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -94,6 +95,20 @@ class DailyTests(unittest.TestCase):
         self.claude = patch.object(daily.shutil, 'which', return_value='fake-claude')
         self.claude.start()
         self.addCleanup(self.claude.stop)
+        # Alerts are mocked away by default so no test can reach WeChat by accident; the tests that
+        # exercise alerting put the real function back with patch.object(daily, 'alert', self.real_alert).
+        self.alerts, self.sent_alerts, self.real_alert = [], [], daily.alert
+        for patcher in (patch.object(daily, 'alert', side_effect=lambda *args: self.alerts.append(args[1:3])),
+                        patch.object(daily.subprocess, 'run', side_effect=self.guard(daily.subprocess.run))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def guard(self, real):
+        """Let the tests' own git calls through, but never the sender itself."""
+        def run(args, **kwargs):
+            self.assertNotIn('wechat_send.py', ' '.join(map(str, args)))
+            return real(args, **kwargs)
+        return run
 
     def push_to_origin(self, name='NOTES.md'):
         """Advance origin/main behind the worktree's back, the way a manual push does."""
@@ -110,8 +125,23 @@ class DailyTests(unittest.TestCase):
     def read_job(self, day='2026-09-08'):
         return json.loads((self.state / 'jobs' / (day + '.json')).read_text())
 
-    def sender(self, code):
-        return patch.object(daily.subprocess, 'run', return_value=Mock(returncode=code))
+    def age(self, path, now, hours=2):
+        """Backdate a file so the deadline check sees a scheduler that stopped moving."""
+        os.utime(path, ((now.timestamp() - hours * 3600),) * 2)
+
+    def sender(self, code=0, alert_code=0, alert_error=None):
+        """Stand in for every wechat_send.py call; an alert is told apart by the file it sends."""
+        alert_file = str(self.state / 'alert.txt')
+
+        def fake(args, **kwargs):
+            self.assertEqual(Path(args[1]).name, 'wechat_send.py')  # nothing else may be run here
+            if args[-1] != alert_file:
+                return Mock(returncode=code)
+            if alert_error:
+                raise alert_error
+            self.sent_alerts.append(Path(alert_file).read_text(encoding='utf-8').strip())
+            return Mock(returncode=alert_code)
+        return patch.object(daily.subprocess, 'run', side_effect=fake)
 
     def test_dry_run_rollover_has_no_side_effects(self):
         text = LEDGER.replace('- [ ]', '- [x]')
@@ -440,6 +470,175 @@ class DailyTests(unittest.TestCase):
             self.runner.tick()
         self.assertEqual(self.read_job()['status'], 'complete')
         self.assertEqual(sum(c == ['git', 'commit'] for c in self.runner.calls), 1)
+
+    # The ledger nobody reads must come to a human by itself, and exactly once.
+
+    def test_failure_tells_a_human_on_wechat(self):
+        self.runner.generated_count = 1
+        with patch.object(daily, 'alert', self.real_alert), self.sender(0):
+            with self.assertRaises(daily.TaskError) as caught:
+                self.runner.tick()
+        self.assertTrue(getattr(caught.exception, 'alerted', False))  # main() must not repeat it
+        self.assertEqual(len(self.sent_alerts), 1)
+        self.assertTrue(self.sent_alerts[0].startswith('9月8日两篇没写成：'))
+        self.assertIn('序号连续', self.sent_alerts[0])
+        self.assertIn('需要人动手', self.sent_alerts[0])
+        self.assertEqual(self.read_job()['status'], 'manual_review')
+
+    def test_the_same_fault_is_told_once(self):
+        self.runner.generated_count = 1
+        log = io.StringIO()
+        with patch.object(daily, 'alert', self.real_alert), self.sender(0), contextlib.redirect_stderr(log):
+            for _ in range(3):  # the first tick generates, the next two resume the stuck day
+                with self.assertRaises(daily.TaskError):
+                    self.runner.tick()
+        self.assertEqual(len(self.sent_alerts), 1)
+        self.assertEqual(list(daily.alerted(self.state)), ['job-2026-09-08'])
+        self.assertEqual(sum(c[0] == 'fake-claude' for c in self.runner.calls), 1)
+
+    def test_wechat_not_ready_is_never_a_fault(self):
+        with patch.object(daily, 'alert', self.real_alert), self.sender(75):
+            self.runner.tick()
+        self.assertEqual(self.sent_alerts, [])
+        self.assertEqual(self.read_job()['delivery'], 'pending')
+        self.assertFalse((self.state / 'alerts.json').exists())
+
+    def test_an_alert_waits_for_wechat_instead_of_giving_up(self):
+        self.runner.generated_count = 1
+        with patch.object(daily, 'alert', self.real_alert), self.sender(0, alert_code=75):
+            for _ in range(2):
+                with self.assertRaises(daily.TaskError):
+                    self.runner.tick()
+        self.assertEqual(len(self.sent_alerts), 2)  # 75 sent nothing, so it is tried again
+        self.assertFalse((self.state / 'alerts.json').exists())
+
+    def test_an_uncertain_alert_is_never_repeated(self):
+        self.runner.generated_count = 1
+        log = io.StringIO()
+        with patch.object(daily, 'alert', self.real_alert), self.sender(0, alert_code=70), \
+                contextlib.redirect_stderr(log):
+            for _ in range(2):
+                with self.assertRaises(daily.TaskError):
+                    self.runner.tick()
+        self.assertEqual(len(self.sent_alerts), 1)
+        self.assertIn('退出码 70', log.getvalue())
+        self.assertEqual(list(daily.alerted(self.state)), ['job-2026-09-08'])
+
+    def test_a_failing_alert_leaves_the_task_alone(self):
+        self.runner.generated_count = 1
+        log = io.StringIO()
+        with patch.object(daily, 'alert', self.real_alert), \
+                self.sender(0, alert_error=OSError('wxmac 不见了')), contextlib.redirect_stderr(log):
+            with self.assertRaises(daily.TaskError) as caught:
+                self.runner.tick()
+        self.assertIn('序号连续', str(caught.exception))  # the task's own error, not the alert's
+        self.assertEqual(self.read_job()['status'], 'manual_review')
+        self.assertIn('序号连续', self.read_job()['error'])
+        self.assertIn('告警发送失败', log.getvalue())
+        self.assertFalse((self.state / 'alerts.json').exists())
+
+    def test_a_stuck_older_day_is_told_once_and_never_blocks_today(self):
+        self.runner.record(dict(date='2026-09-07', status='manual_review', error='页数不对'))
+        log = io.StringIO()
+        with patch.object(daily, 'alert', self.real_alert), self.sender(0), contextlib.redirect_stderr(log):
+            self.runner.tick()
+            self.runner.tick()
+        self.assertEqual(self.sent_alerts, ['9月7日两篇没写成：页数不对。现场已保留，需要人动手。'])
+        self.assertEqual(self.read_job()['status'], 'complete')
+
+    def test_a_recovered_day_can_speak_again(self):
+        with patch.object(daily, 'alert', self.real_alert), self.sender(0, alert_code=75):
+            self.runner.render_failure = True
+            with self.assertRaises(daily.TaskError):
+                self.runner.tick()
+            self.runner.render_failure = False
+            self.runner.tick()
+        self.assertEqual(self.read_job()['status'], 'complete')
+        self.assertEqual(daily.alerted(self.state), {})
+
+    def test_unfinished_day_is_told_after_eight(self):
+        with patch.object(daily, 'alert', self.real_alert), self.sender(0):
+            self.assertFalse(daily.overdue(self.state, self.now.replace(hour=7, minute=55)))
+            self.assertTrue(daily.overdue(self.state, self.now.replace(hour=8, minute=5)))
+            self.assertFalse(daily.overdue(self.state, self.now.replace(hour=8, minute=10)))
+        self.assertEqual(len(self.sent_alerts), 1)
+        self.assertIn('9月8日到八点还没写成两篇', self.sent_alerts[0])
+        self.assertIn('今天没有任务记录', self.sent_alerts[0])
+
+    def test_a_finished_or_already_told_day_stays_quiet(self):
+        with patch.object(daily, 'alert', self.real_alert), self.sender(0):
+            self.runner.tick()
+            self.assertFalse(daily.overdue(self.state, self.now.replace(hour=9)))
+            # A day whose own fault already reached a human must not be reported a second time.
+            later = self.now + dt.timedelta(days=1, hours=3)
+            day = later.date().isoformat()
+            self.runner.record(dict(date=day, status='manual_review'))
+            self.age(self.state / 'jobs' / (day + '.json'), later)
+            self.age(self.state / 'heartbeat.json', later)
+            daily.save(self.state / 'alerts.json', {'job-' + day: '已经说过了'})
+            self.assertFalse(daily.overdue(self.state, later))
+        self.assertEqual(self.sent_alerts, [])
+
+    def test_a_run_still_moving_is_not_reported(self):
+        later = self.now.replace(hour=9)
+        path = self.state / 'jobs' / '2026-09-08.json'
+        self.runner.record(dict(date='2026-09-08', status='generating'))
+        with patch.object(daily, 'alert', self.real_alert), self.sender(0):
+            # A Mac that woke up late is writing today's two right now: that is work, not a fault.
+            os.utime(path, (later.timestamp() - 600,) * 2)
+            self.assertFalse(daily.overdue(self.state, later))
+            os.utime(path, (later.timestamp() - 7200,) * 2)
+            self.assertTrue(daily.overdue(self.state, later))
+        self.assertEqual(len(self.sent_alerts), 1)
+        self.assertIn('generating', self.sent_alerts[0])
+
+    def test_pending_delivery_alone_is_not_reported(self):
+        with patch.object(daily, 'alert', self.real_alert), self.sender(75):
+            self.runner.tick()  # published, waiting for WeChat to wake up
+            self.assertFalse(daily.overdue(self.state, self.now.replace(hour=10)))
+        self.assertEqual(self.sent_alerts, [])
+
+    def test_heartbeat_marks_every_finished_pass(self):
+        with self.sender(0):
+            self.runner.tick()
+        beat = json.loads((self.state / 'heartbeat.json').read_text())
+        self.assertEqual((beat['day'], beat['status']), ('2026-09-08', 'complete'))
+        self.assertEqual(dt.datetime.fromisoformat(beat['time']).utcoffset(), dt.timedelta(hours=8))
+        (self.state / 'heartbeat.json').unlink()
+        tomorrow = FakeRunner(self.repo, self.state, self.now + dt.timedelta(days=1))
+        tomorrow.generated_count = 1
+        with self.sender(0):
+            with self.assertRaises(daily.TaskError):
+                tomorrow.tick()
+        self.assertFalse((self.state / 'heartbeat.json').exists())  # an unfinished pass is no proof
+
+    def test_scheduled_run_checks_the_day_after_its_own_work(self):
+        log = io.StringIO()
+        with patch.object(daily, 'STATE', self.state), patch.object(daily, 'REPO', self.repo), \
+                patch.object(daily, 'bootstrap'), patch.object(daily, 'Runner') as runner, \
+                patch.object(daily, 'overdue') as check, contextlib.redirect_stderr(log):
+            self.assertEqual(daily.main(['--scheduled']), 0)
+            self.assertEqual(daily.main([]), 0)  # a hand run must not nag anyone
+            with daily.locked(self.state) as held:  # a run already going is still a day to check
+                self.assertTrue(held)
+                self.assertEqual(daily.main(['--scheduled']), 0)
+            self.assertEqual(check.call_count, 2)
+            runner.return_value.tick.side_effect = daily.TaskError('炸了')
+            self.assertEqual(daily.main(['--scheduled']), 1)
+        self.assertEqual(check.call_count, 2)  # a run that reported itself is not reported twice
+        self.assertEqual(runner.return_value.tick.call_count, 3)
+
+    def test_a_run_that_cannot_start_still_speaks(self):
+        log = io.StringIO()
+        with patch.object(daily, 'STATE', self.state), patch.object(daily, 'REPO', self.repo), \
+                patch.object(daily, 'overdue'), patch.object(daily, 'alert', self.real_alert), \
+                patch.object(daily, 'bootstrap', side_effect=daily.TaskError('worktree 建不起来')), \
+                self.sender(0), contextlib.redirect_stderr(log):
+            self.assertEqual(daily.main(['--scheduled']), 1)
+            self.assertEqual(daily.main(['--scheduled']), 1)
+        self.assertEqual(len(self.sent_alerts), 1)  # the same outage says it once a day
+        self.assertIn('没能开工', self.sent_alerts[0])
+        self.assertIn('worktree 建不起来', self.sent_alerts[0])
 
 
 if __name__ == '__main__':

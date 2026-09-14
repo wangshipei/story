@@ -23,6 +23,12 @@ STATE = Path.home() / 'Library/Application Support/story-daily'
 REPO = Path(os.environ.get('STORY_REPO') or STATE / 'worktree')
 STORY = re.compile(r'^\d{3}-.+\.md$')
 JOB = re.compile(r'^\d{4}-\d{2}-\d{2}$')  # Only date-named files are jobs; anything else in jobs/ is ignored.
+# Alerts run this checkout's sender, next to this file: a broken worktree must still be able to speak.
+SENDER = SOURCE / 'cron/wechat_send.py'
+STEPS = {'generating': '两篇没写成', 'manual_review': '两篇没写成', 'generated': '写好了没提交',
+         'committing': '写好了没提交', 'committed': '提交了没推上去', 'pushed': '推上去了没上站',
+         'published': '上站了没发出来'}
+DONE = {'published', 'complete'}  # nothing left that a human could hurry along; delivery waits on WeChat
 
 
 class TaskError(RuntimeError):
@@ -105,6 +111,75 @@ def environment():
                         env['CLAUDE_CODE_OAUTH_TOKEN'] = value
                         break
     return env
+
+
+def alerted(state):
+    """Text of the last alert sent under each key. Damage here must not silence a new alert."""
+    try:
+        value = json.loads((state / 'alerts.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def alert(state, key, text, env=None):
+    """Say one plain sentence on WeChat, once per fault. Never raises: alerting must not add faults."""
+    try:
+        if alerted(state).get(key) == text:
+            return False  # the same fault every five minutes would bury the one that matters
+        if not SENDER.is_file():
+            raise TaskError(f'找不到发送脚本 {SENDER}')
+        state.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = state / 'alert.txt'
+        path.write_text(text + '\n', encoding='utf-8')
+        path.chmod(0o600)
+        code = subprocess.run([sys.executable, str(SENDER), str(path)], cwd=SENDER.parent,
+                              env=env or environment(), timeout=180).returncode
+        # 75 is WeChat asleep, locked or busy: nothing was sent and nothing is wrong. Retry next tick.
+        if code == 75:
+            return False
+        # Any other code either sent it or left the outcome uncertain, and wechat_send.py never
+        # repeats an uncertain send; record it either way so this cannot become a second message.
+        ledger = alerted(state)
+        ledger[key] = text
+        save(state / 'alerts.json', ledger)
+        if code:
+            report(f'告警未必发出（退出码 {code}），不再重发：{text}')
+        return not code
+    except (TaskError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        report(f'告警发送失败，任务状态不受影响：{type(exc).__name__}：{exc}')
+        return False
+
+
+def overdue(state, now, env=None):
+    """Past the morning deadline with today unfinished: the failure no exception would report."""
+    now = now.astimezone(BEIJING)
+    day = now.date().isoformat()
+    if now.hour < 8:  # 06:00 start plus two hours of slack for a Mac that woke up late
+        return False
+    try:
+        job = json.loads((state / 'jobs' / (day + '.json')).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        job = None
+    status = job.get('status') if isinstance(job, dict) else None
+    # Everything but delivery done means WeChat is asleep; that is a wait, not a fault.
+    if status in DONE:
+        return False
+    # This day already spoke for itself: one incident is worth exactly one message.
+    if 'job-' + day in alerted(state):
+        return False
+
+    def moved(path):
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+    # A run in progress keeps touching these. Only a scheduler that stopped moving — a hung run
+    # holding the lock, a task that never got going — leaves both untouched for an hour.
+    if now.timestamp() - max(moved(state / 'jobs' / (day + '.json')), moved(state / 'heartbeat.json')) < 3600:
+        return False
+    return alert(state, 'day-' + day, f'{now.month}月{now.day}日到八点还没写成两篇：'
+                 f'任务状态「{status or "今天没有任务记录"}」，也没有报错。需要人动手看一眼。', env)
 
 
 def command(args, repo, env, timeout=300, log=None):
@@ -404,6 +479,41 @@ class Runner:
             return {}
         return value if isinstance(value, dict) else {}
 
+    def job(self, date):
+        """The recorded job for a day, or None when it is missing, damaged or misnamed."""
+        try:
+            job = json.loads((self.state / 'jobs' / (date + '.json')).read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return None
+        return job if isinstance(job, dict) and job.get('date') == date else None
+
+    def fault(self, date, exc):
+        """Tell a human once: which day, which step it stopped at, and whether anyone must act."""
+        exc.alerted = True  # main() must not repeat what this sentence already carries
+        job = self.job(date) or {}
+        status = job.get('status')
+        step = STEPS.get(status) or ('任务记录读不出来' if (self.state / 'jobs' / (date + '.json')).exists()
+                                     else '两篇没写成')
+        # The job's own recorded error keeps this sentence identical on every path that reports the
+        # same day, so a day stuck for a week costs one message, not one message a day.
+        reason = job.get('error') or str(exc) or type(exc).__name__
+        manual = job.get('delivery') == 'sending' or status in {None, 'generating', 'manual_review'}
+        stamp = dt.date.fromisoformat(date)
+        alert(self.state, 'job-' + date, f'{stamp.month}月{stamp.day}日{step}：{reason}。'
+              + ('现场已保留，需要人动手。' if manual else '下一轮会自动重试，先不用管。'), self.env)
+
+    def resolve(self, key):
+        """A day that recovered must be able to speak again if it breaks later."""
+        ledger = alerted(self.state)
+        if ledger.pop(key, None) is not None:
+            save(self.state / 'alerts.json', ledger)
+
+    def beat(self):
+        """A finished pass is the only proof this scheduler still runs; a watchdog outside reads it."""
+        save(self.state / 'heartbeat.json',
+             {'time': dt.datetime.now(BEIJING).isoformat(timespec='seconds'), 'day': self.day,
+              'status': (self.job(self.day) or {}).get('status', 'none')})
+
     def defer(self, job, text):
         """Park a stuck job in its own file; report whether this failure repeats the last one."""
         repeated = job.get('last_error') == text
@@ -429,7 +539,7 @@ class Runner:
 
     def tick(self, scheduled=False):
         jobs = sorted(p for p in (self.state / 'jobs').glob('*.json') if JOB.match(p.stem))
-        stale, broken = self.stale(), {}
+        stale, broken, told = self.stale(), {}, alerted(self.state)
         today_exists = False
         for path in jobs:
             # JOB already proved the name is a date: identity comes from the file name, not its
@@ -446,6 +556,7 @@ class Runner:
             except (TaskError, OSError, ValueError, KeyError) as exc:
                 # Today's own job is this run's output; only older jobs are retries to skip.
                 if path.stem == self.day:
+                    self.fault(self.day, exc)
                     raise
                 text = f'{type(exc).__name__}：{exc}'
                 if isinstance(job, dict) and job.get('date') == path.stem:
@@ -456,15 +567,23 @@ class Runner:
                 # The same failure every five minutes must not bury the rest of the log.
                 if not repeated:
                     report(f'{path.stem} 任务卡住，保留现场并跳过：{exc}')
+                    self.fault(path.stem, exc)  # nobody reads the log; say it where a human looks
             else:
                 if job.pop('last_error', None) is not None:
                     job.pop('failures', None)  # A recovered job must not silence its next failure.
                     self.record(job)
+                # Only a finished day clears its alert, so a half-done one cannot flip-flop into noise.
+                if job.get('status') == 'complete' and 'job-' + job['date'] in told:
+                    self.resolve('job-' + job['date'])
         if broken != stale:
             save(self.state / 'broken.json', broken)  # Rebuilt each tick: a repaired file drops out.
-        if today_exists or (scheduled and self.now.hour < 6):
-            return
-        self.resume(self.start())  # Failure here must reach the caller and the exit code.
+        if not today_exists and not (scheduled and self.now.hour < 6):
+            try:
+                self.resume(self.start())  # Failure here must reach the caller and the exit code.
+            except (TaskError, OSError, ValueError, KeyError) as exc:
+                self.fault(self.day, exc)
+                raise
+        self.beat()
 
 
 def main(argv=None):
@@ -486,18 +605,28 @@ def main(argv=None):
         return 0
     try:
         with locked(STATE) as acquired:
-            if not acquired:
+            if acquired:
+                # Repair the workspace before any state machine runs; a deleted worktree heals here.
+                bootstrap(REPO, environment())
+                if args.bootstrap:
+                    print('工作仓库就绪：' + str(REPO))
+                    return 0
+                Runner(REPO).tick(args.scheduled)
+            else:
                 print('上一次任务还在运行，跳过')
-                return 0
-            # Repair the workspace before any state machine runs; a deleted worktree heals here.
-            bootstrap(REPO, environment())
-            if args.bootstrap:
-                print('工作仓库就绪：' + str(REPO))
-                return 0
-            Runner(REPO).tick(args.scheduled)
+        # After the run, never before it: a Mac that wakes up late writes today's two right here, and
+        # must not be accused first. A run that hangs holding the lock reports nothing else at all.
+        if args.scheduled:
+            overdue(STATE, dt.datetime.now(BEIJING))
         return 0
     except (TaskError, OSError, ValueError, KeyError) as exc:
         report(exc)
+        # A day's own fault already told a human; a failure outside one (bootstrap, lock, state) owes
+        # them this one sentence. One key per day: an outage repeats daily, never every five minutes.
+        if not getattr(exc, 'alerted', False):
+            stamp = dt.datetime.now(BEIJING)
+            alert(STATE, 'run-' + stamp.date().isoformat(),
+                  f'{stamp.month}月{stamp.day}日的定时写作没能开工：{exc}。需要人动手。')
         return 1
 
 
