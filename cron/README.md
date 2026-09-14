@@ -10,7 +10,9 @@ launchctl print gui/$(id -u)/com.friday.story-daily
 launchctl bootout gui/$(id -u)/com.friday.story-daily  # 暂停
 ```
 
-依赖本机 Claude 登录、Node、Python 3、Google Chrome、Git SSH、`apps2-server` SSH 别名与 `/Users/friday/.local/bin/wxmac`。不需要复制服务器凭据。脚本使用当前账号，不修改 HOME 或系统锁屏设置。运行期间 `caffeinate -i` 防止闲置睡眠，不会解锁电脑。首次安装运行 `npm ci` 安装锁定版本的 `playwright-core`；渲染器使用独立无头 Chrome，不占用日常浏览器会话，可通过 `STORY_CHROME` 指定可执行文件路径。
+依赖本机 Claude 登录、Node、Python 3、Google Chrome、Git SSH、`apps2-server` SSH 别名与 `/Users/friday/.local/bin/wxmac`。不需要复制服务器凭据。脚本使用当前账号，不修改 HOME 或系统锁屏设置。运行期间 `caffeinate -i` 防止闲置睡眠，不会解锁电脑。渲染器使用独立无头 Chrome，不占用日常浏览器会话，可通过 `STORY_CHROME` 指定可执行文件路径。
+
+`node_modules` 不进版本库，而 worktree 是新目录，所以 `--bootstrap` 会在 worktree 里跑 `npm ci` 安装锁定版本的 `playwright-core`，并把 `package-lock.json` 的摘要写进 `node_modules/.story-install`；`git reset --hard` 不动被忽略的文件，因此只在依赖缺失或锁文件变化时重装。主工作区的 `node_modules` 与它互不相干。
 
 本机默认 GitHub 密钥属于其他仓库，不能推送 story。本地仓库使用 V4 已有的 `github-story` 专用密钥中转 Git 连接，配置只存在当前仓库的 `.git/config`；重新克隆或迁移机器时需重新设置：
 
@@ -21,7 +23,15 @@ git config core.sshCommand 'ssh -o BatchMode=yes -o ConnectTimeout=15 apps2-serv
 
 拉取和推送均依赖 V4 的 SSH 连接；密钥留在 V4，不复制到本地。
 
-开始写作前要求 `main` 分支、工作区干净、`git pull --ff-only` 成功。本地开发中的改动先提交或暂存。Claude 用 Opus / xhigh 按轮值写作，校验通过后构建、提交、推送，再将静态站同步到 V4，最后发送微信。只暂存本次两篇与登记/构建文件。
+## 独立 worktree
+
+定时任务在自己的 detached worktree `~/Library/Application Support/story-daily/worktree` 里干活，主工作区怎么改都影响不到它。`STORY_REPO` 指定干活的仓库，默认就是这个 worktree；`cron/daily.sh --repo` 打印实际路径，`cron/daily.sh --bootstrap` 只准备仓库和依赖、不写作。LaunchAgent 跑的是**主工作区**的 `cron/daily.py`（改完立刻生效，不必先 push），`WorkingDirectory` 也留在主工作区——指向不存在的目录时 launchd 在 spawn 阶段就失败，Python 一行不跑、日志里没有线索。worktree 被误删或清空，下一轮自动重建。
+
+开始写作前要求 worktree 干净、没有未推送的提交，`git fetch origin` 成功；随后 `git reset --hard origin/main`，所以当天两篇一定长在最新的 `origin/main` 上。**只有这一步会 reset**：`generated`（两篇已写、尚未提交）之后的任何恢复路径都不同步、不 reset，否则跨天恢复会把稿子和登记一起抹掉。分支名不再检查——worktree 是 detached，`git branch --show-current` 返回空。推送用 `git push origin HEAD:main` 显式 refspec。
+
+worktree 看不见主工作区未推送的稿子，序号可能撞。若远端已前进，push 会被拒，任务停在 `committed` 保留现场等人工处理，不会强推。Claude 用 Opus / xhigh 按轮值写作，校验通过后构建、提交、推送，再将静态站同步到 V4，最后发送微信。只暂存本次两篇与登记/构建文件。
+
+任务状态里记着生成它的仓库（`repo` 字段）。状态目录是全局的，若某天的任务由别的仓库生成，当前仓库只会报错保留现场，绝不拿自己的工作区去发布别人的稿子。
 
 ## 微信
 

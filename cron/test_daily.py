@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -37,8 +38,8 @@ class FakeRunner(daily.Runner):
 
     def run(self, args, timeout=300, log=None):
         self.calls.append(args[:2])
-        if args[:2] == ['git', 'pull']:
-            return ''
+        if args[:2] == ['git', 'push'] and self.push_failure:
+            raise daily.TaskError('offline')
         if args[0] == 'fake-claude':
             for i in range(self.generated_count):
                 title = ['门', '窗'][i]
@@ -60,10 +61,6 @@ class FakeRunner(daily.Runner):
         if args[0] == 'node':
             (self.repo / 'site/stories.js').write_text('built stories')
             return ''
-        if args[:2] == ['git', 'push']:
-            if self.push_failure:
-                raise daily.TaskError('offline')
-            return ''
         if args[0] == 'bash':
             return ''
         return super().run(args, timeout, log)
@@ -73,25 +70,42 @@ class DailyTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.repo = Path(self.tmp.name) / 'repo'
-        self.state = Path(self.tmp.name) / 'state'
-        self.repo.mkdir()
+        root = Path(self.tmp.name)
+        self.origin, self.source = root / 'origin.git', root / 'source'
+        self.repo, self.state = root / 'worktree', root / 'state'
+        self.source.mkdir()
         self.state.mkdir()
-        (self.repo / 'site').mkdir()
-        (self.repo / 'ROTATION.md').write_text(LEDGER)
-        (self.repo / 'CLAUDE.md').write_text('- **失望（等的人没来）**——待写。\n- **安宁／幸福**——待写。\n'
+        (self.source / 'site').mkdir()
+        (self.source / 'ROTATION.md').write_text(LEDGER)
+        (self.source / 'CLAUDE.md').write_text('- **失望（等的人没来）**——待写。\n- **安宁／幸福**——待写。\n'
                                           '### 待写清单（选题池）\n\n失望 · 安宁／幸福 · 骄傲（正面）\n\n## 下节\n')
-        (self.repo / '001-旧.md').write_text('# 旧\n旧故事')
-        (self.repo / 'site/stories.js').write_text('old')
+        (self.source / '001-旧.md').write_text('# 旧\n旧故事')
+        (self.source / 'site/stories.js').write_text('old')
+        subprocess.run(['git', 'init', '--bare', str(self.origin)], check=True, capture_output=True)
+        # The real thing: a bare origin plus a detached worktree, so no test mocks away detached HEAD.
         for args in [('init', '-b', 'main'), ('config', 'user.name', 'Test'),
                      ('config', 'user.email', 'test@example.invalid'), ('add', '.'),
-                     ('commit', '-m', 'initial')]:
-            subprocess.run(['git', *args], cwd=self.repo, check=True, capture_output=True)
+                     ('commit', '-m', 'initial'), ('remote', 'add', 'origin', str(self.origin)),
+                     ('push', '-u', 'origin', 'main'),
+                     ('worktree', 'add', '--detach', str(self.repo), 'origin/main')]:
+            subprocess.run(['git', *args], cwd=self.source, check=True, capture_output=True)
         self.now = dt.datetime(2026, 9, 8, 6, tzinfo=daily.BEIJING)
         self.runner = FakeRunner(self.repo, self.state, self.now)
         self.claude = patch.object(daily.shutil, 'which', return_value='fake-claude')
         self.claude.start()
         self.addCleanup(self.claude.stop)
+
+    def push_to_origin(self, name='NOTES.md'):
+        """Advance origin/main behind the worktree's back, the way a manual push does."""
+        (self.source / name).write_text('手写改动')
+        for args in [('add', '.'), ('commit', '-m', 'manual'), ('push', 'origin', 'main')]:
+            subprocess.run(['git', *args], cwd=self.source, check=True, capture_output=True)
+        return subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=self.source, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def head(self, repo=None):
+        return subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=repo or self.repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
 
     def read_job(self, day='2026-09-08'):
         return json.loads((self.state / 'jobs' / (day + '.json')).read_text())
@@ -316,13 +330,92 @@ class DailyTests(unittest.TestCase):
         with self.assertRaises(daily.TaskError):
             self.runner.tick()
         self.assertFalse((self.state / 'jobs').exists())
-        self.assertNotIn(['git', 'pull'], self.runner.calls)
+        self.assertNotIn(['git', 'fetch'], self.runner.calls)
 
-    def test_feature_branch_not_pulled(self):
-        self.runner.git('checkout', '-b', 'work')
+    def test_generation_starts_from_origin_main(self):
+        pushed = self.push_to_origin()
+        with self.sender(0):
+            self.runner.tick()
+        # The worktree took the manual push before writing, so today's numbers follow it.
+        self.assertTrue((self.repo / 'NOTES.md').is_file())
+        self.assertEqual(self.read_job()['base_head'], pushed)
+        self.assertEqual(self.read_job()['status'], 'complete')
+
+    def test_unpushed_commit_blocks_generation(self):
+        (self.repo / 'NOTES.md').write_text('只在本地')
+        for args in [('add', '.'), ('commit', '-m', 'local')]:
+            subprocess.run(['git', *args], cwd=self.repo, check=True, capture_output=True)
         with self.assertRaises(daily.TaskError):
             self.runner.tick()
-        self.assertNotIn(['git', 'pull'], self.runner.calls)
+        self.assertNotIn(['git', 'reset'], self.runner.calls)
+        self.assertFalse((self.state / 'jobs').exists())
+        self.assertTrue((self.repo / 'NOTES.md').is_file())
+
+    def test_generated_stories_survive_a_later_resume(self):
+        job = self.runner.start()
+        self.assertEqual(job['status'], 'generated')
+        tomorrow = FakeRunner(self.repo, self.state, self.now + dt.timedelta(hours=23))
+        with self.sender(0) as send:
+            tomorrow.tick(scheduled=True)  # 05:00: no new day begins; yesterday's job resumes
+        # A reset on this path rolls back the ledger, and once committed it deletes both stories.
+        self.assertNotIn(['git', 'reset'], tomorrow.calls)
+        self.assertNotIn(['git', 'fetch'], tomorrow.calls)
+        for name in job['files']:
+            self.assertTrue((self.repo / name).is_file())
+        self.assertIn('2026-09-08 002《门》', (self.repo / 'ROTATION.md').read_text())
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(self.read_job()['status'], 'complete')
+
+    def test_rejected_push_keeps_the_scene(self):
+        job = self.runner.start()
+        self.push_to_origin()  # a manual push landed while Claude was writing
+        with self.sender(0) as send:
+            with self.assertRaises(daily.TaskError):
+                self.runner.tick()  # never force-pushed: the day waits for a human
+        self.assertEqual(send.call_count, 0)
+        self.assertEqual(self.read_job()['status'], 'committed')
+        for name in job['files']:
+            self.assertTrue((self.repo / name).is_file())
+
+    def test_second_checkout_does_not_publish_the_worktree_job(self):
+        self.runner.start()
+        other = FakeRunner(self.source, self.state, self.now)  # same STATE, different repo
+        with self.sender(0) as send:
+            with self.assertRaises(daily.TaskError):
+                other.tick()
+        self.assertEqual(send.call_count, 0)
+        self.assertNotIn(['git', 'commit'], other.calls)
+        self.assertEqual(self.read_job()['status'], 'generated')
+        self.assertEqual(sum(c[0] == 'fake-claude' for c in other.calls), 0)
+
+    def test_missing_worktree_is_recreated(self):
+        shutil.rmtree(self.repo)
+        pushed = self.push_to_origin()
+        daily.bootstrap(self.repo, self.runner.env, self.source)
+        daily.bootstrap(self.repo, self.runner.env, self.source)  # idempotent
+        self.assertEqual(self.head(), pushed)
+        self.assertTrue((self.repo / 'ROTATION.md').is_file())
+        branch = subprocess.run(['git', 'branch', '--show-current'], cwd=self.repo, check=True,
+                                capture_output=True, text=True)
+        self.assertEqual(branch.stdout.strip(), '')  # detached on purpose
+        with self.sender(0):
+            self.runner.tick()
+        self.assertEqual(self.read_job()['status'], 'complete')
+
+    def test_dependencies_installed_once_per_lockfile(self):
+        binaries = Path(self.tmp.name) / 'bin'
+        binaries.mkdir()
+        calls = binaries / 'npm-calls'
+        (binaries / 'npm').write_text(f'#!/bin/sh\n/bin/mkdir -p node_modules\necho "$@" >> {calls}\n')
+        (binaries / 'npm').chmod(0o755)
+        env = dict(self.runner.env, PATH=str(binaries))
+        (self.repo / 'package-lock.json').write_text('{"v":1}')
+        daily.bootstrap(self.repo, env, self.source)
+        daily.bootstrap(self.repo, env, self.source)
+        self.assertEqual(calls.read_text().split(), ['ci'])
+        (self.repo / 'package-lock.json').write_text('{"v":2}')
+        daily.bootstrap(self.repo, env, self.source)
+        self.assertEqual(calls.read_text().split(), ['ci', 'ci'])
 
     def test_local_edits_after_generation_are_not_committed(self):
         job = self.runner.start()

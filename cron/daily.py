@@ -17,8 +17,10 @@ import sys
 import tempfile
 
 BEIJING = dt.timezone(dt.timedelta(hours=8))
-REPO = Path(__file__).resolve().parents[1]
+SOURCE = Path(__file__).resolve().parents[1]  # where this code lives; holds the real .git
 STATE = Path.home() / 'Library/Application Support/story-daily'
+# The task works in its own detached worktree so the user's checkout can never race it.
+REPO = Path(os.environ.get('STORY_REPO') or STATE / 'worktree')
 STORY = re.compile(r'^\d{3}-.+\.md$')
 JOB = re.compile(r'^\d{4}-\d{2}-\d{2}$')  # Only date-named files are jobs; anything else in jobs/ is ignored.
 
@@ -124,6 +126,27 @@ def command(args, repo, env, timeout=300, log=None):
     return (output or '').strip()
 
 
+def bootstrap(repo, env, source=None):
+    """Prepare the private worktree and its ignored dependencies; safe to repeat every run."""
+    source, repo = Path(source or SOURCE).resolve(), Path(repo).resolve()
+    if repo == source:
+        return  # A plain checkout is its own workspace; never touch the user's files.
+    if not (repo / '.git').exists():
+        if repo.exists():
+            repo.rmdir()  # An empty leftover blocks `worktree add`; anything else is a scene to keep.
+        command(['git', 'fetch', 'origin'], source, env)
+        command(['git', 'worktree', 'prune'], source, env)  # forget a worktree the user deleted
+        command(['git', 'worktree', 'add', '--detach', str(repo), 'origin/main'], source, env)
+    lock = repo / 'package-lock.json'
+    stamp = repo / 'node_modules/.story-install'
+    if lock.is_file():
+        digest = hashlib.sha256(lock.read_bytes()).hexdigest()
+        # `git reset --hard` keeps ignored files: install only when they are missing or stale.
+        if not stamp.is_file() or stamp.read_text(encoding='utf-8') != digest:
+            command(['npm', 'ci'], repo, env, timeout=900)
+            stamp.write_text(digest, encoding='utf-8')
+
+
 def prompt(picks, day):
     return f'''你在微小说集《照常》的仓库里。先完整读 CLAUDE.md，再读 001–004 四篇范本和序号最大的三篇找语感。
 今天写且只写两篇新篇，主情绪由 ROTATION.md 指定，不要换：
@@ -141,7 +164,7 @@ def prompt(picks, day):
 
 class Runner:
     def __init__(self, repo=REPO, state=STATE, now=None):
-        self.repo, self.state = Path(repo), Path(state)
+        self.repo, self.state = Path(repo).resolve(), Path(state)
         self.now = now or dt.datetime.now(BEIJING)
         self.now = self.now.astimezone(BEIJING)
         self.day = self.now.date().isoformat()
@@ -220,14 +243,17 @@ class Runner:
     def start(self):
         if self.changes():
             raise TaskError('工作区不干净，暂停生成；请先保存本地开发改动')
-        if self.git('branch', '--show-current') != 'main':
-            raise TaskError('自动写作要求 main 分支')
-        self.git('pull', '--ff-only', 'origin', 'main')
+        self.git('fetch', 'origin')
+        # A detached worktree has no branch name; what matters is that nothing here is unpushed.
+        if self.git('rev-list', '--count', 'HEAD', '^origin/main') != '0':
+            raise TaskError('有未推送的提交，暂停生成；请人工处理后再恢复')
+        # Only start() may reset: resume() can meet stories written but not yet committed.
+        self.git('reset', '--hard', 'origin/main')
         if self.changes():
-            raise TaskError('拉取后工作区不干净')
+            raise TaskError('同步 origin/main 后工作区不干净')
         picks, ledger = rotation((self.repo / 'ROTATION.md').read_text(encoding='utf-8'))
         job = dict(date=self.day, status='generating', delivery='pending', delivery_format='images', picks=picks,
-                   before=self.files(), base_head=self.git('rev-parse', 'HEAD'))
+                   repo=str(self.repo), before=self.files(), base_head=self.git('rev-parse', 'HEAD'))
         self.record(job)  # Intent precedes any generation; a crash must never write again.
         (self.repo / 'ROTATION.md').write_text(ledger, encoding='utf-8')
         try:
@@ -390,6 +416,9 @@ class Runner:
     def resume(self, job):
         if job['status'] == 'complete':
             return
+        # One STATE serves every checkout; only the repo that wrote a job may publish it.
+        if job.get('repo', str(self.repo)) != str(self.repo):
+            raise TaskError(f'{job["date"]} 由其他仓库生成（{job["repo"]}）；保留现场，请人工处理')
         if job['status'] in {'generating', 'manual_review'}:
             raise TaskError(f'{job["date"]} 生成中断或校验失败；保留现场，需人工处理 {self.state / "jobs"}')
         if job['status'] not in {'generated', 'committing', 'committed', 'pushed', 'published'}:
@@ -443,9 +472,16 @@ def main(argv=None):
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--dry-run', action='store_true')
     group.add_argument('--scheduled', action='store_true')
+    group.add_argument('--repo', action='store_true', help='打印本次任务干活的仓库路径')
+    group.add_argument('--bootstrap', action='store_true', help='只准备工作仓库，不写作')
     args = parser.parse_args(argv)
+    if args.repo:
+        print(REPO)
+        return 0
     if args.dry_run:
-        picks, _ = rotation((REPO / 'ROTATION.md').read_text(encoding='utf-8'))
+        # Dry runs create nothing: read the ledger from the source checkout until the worktree exists.
+        ledger = REPO if (REPO / 'ROTATION.md').is_file() else SOURCE
+        picks, _ = rotation((ledger / 'ROTATION.md').read_text(encoding='utf-8'))
         print('下一次轮到：' + ' ／ '.join(picks))
         return 0
     try:
@@ -453,7 +489,12 @@ def main(argv=None):
             if not acquired:
                 print('上一次任务还在运行，跳过')
                 return 0
-            Runner().tick(args.scheduled)
+            # Repair the workspace before any state machine runs; a deleted worktree heals here.
+            bootstrap(REPO, environment())
+            if args.bootstrap:
+                print('工作仓库就绪：' + str(REPO))
+                return 0
+            Runner(REPO).tick(args.scheduled)
         return 0
     except (TaskError, OSError, ValueError, KeyError) as exc:
         report(exc)
