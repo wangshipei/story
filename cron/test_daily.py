@@ -78,8 +78,8 @@ class DailyTests(unittest.TestCase):
         self.state.mkdir()
         (self.source / 'site').mkdir()
         (self.source / 'ROTATION.md').write_text(LEDGER)
-        (self.source / 'CLAUDE.md').write_text('- **失望（等的人没来）**——待写。\n- **安宁／幸福**——待写。\n'
-                                          '### 待写清单（选题池）\n\n失望 · 安宁／幸福 · 骄傲（正面）\n\n## 下节\n')
+        (self.source / 'CLAUDE.md').write_text(
+            self.guide(['失望（等的人没来）', '安宁／幸福'], '失望 · 安宁／幸福 · 骄傲（正面）'))
         (self.source / '001-旧.md').write_text('# 旧\n旧故事')
         (self.source / 'site/stories.js').write_text('old')
         subprocess.run(['git', 'init', '--bare', str(self.origin)], check=True, capture_output=True)
@@ -102,6 +102,19 @@ class DailyTests(unittest.TestCase):
                         patch.object(daily.subprocess, 'run', side_effect=self.guard(daily.subprocess.run))):
             patcher.start()
             self.addCleanup(patcher.stop)
+
+    def guide(self, cells, pool='骄傲（正面）'):
+        """A CLAUDE.md holding only the emotion cells a test cares about, plus the selection pool."""
+        return (''.join(f'- **{name}**——待写。\n' for name in cells)
+                + f'### 待写清单（选题池）\n\n{pool}\n\n## 下节\n')
+
+    def rewrite(self, ledger=None, guide=None):
+        """Hand-edit ROTATION.md / CLAUDE.md on origin/main, where the worktree will reset onto them."""
+        for name, text in (('ROTATION.md', ledger), ('CLAUDE.md', guide)):
+            if text is not None:
+                (self.source / name).write_text(text)
+        for args in [('add', '.'), ('commit', '-m', 'edit'), ('push', 'origin', 'main')]:
+            subprocess.run(['git', *args], cwd=self.source, check=True, capture_output=True)
 
     def guard(self, real):
         """Let the tests' own git calls through, but never the sender itself."""
@@ -155,6 +168,55 @@ class DailyTests(unittest.TestCase):
     def test_same_category_rejected(self):
         with self.assertRaises(daily.TaskError):
             daily.rotation(LEDGER.replace('（喜）', '（怒）'))
+
+    # The ledger names an emotion its own way; CLAUDE.md keeps the cell. The two must still meet.
+
+    def test_a_longer_entry_name_registers_in_its_cell(self):
+        self.rewrite(LEDGER.replace('失望（怒）', '整篇好笑（其他）'),
+                     self.guide(['好笑', '好奇／天真', '安宁／幸福'], '整篇好笑 · 安宁／幸福 · 骄傲（正面）'))
+        with self.sender(0):
+            self.runner.tick()
+        guide = (self.repo / 'CLAUDE.md').read_text()
+        self.assertIn('- **好笑**——待写。；《门》', guide)  # 「整篇好笑」 is the cell 「好笑」 spelled long
+        self.assertNotIn('《门》', guide.split('- **好奇／天真**')[1])
+        self.assertIn('- [x] 整篇好笑（其他） → 2026-09-08 002《门》', (self.repo / 'ROTATION.md').read_text())
+        self.assertIn('清单（选题池）\n\n骄傲（正面）', guide)  # the pool spelled it long too
+        self.assertEqual(self.read_job()['status'], 'complete')
+
+    def test_two_possible_cells_stop_the_day_instead_of_guessing(self):
+        self.rewrite(guide=self.guide(['失望（等的人没来）', '失望（正面）', '安宁／幸福']))
+        with self.assertRaises(daily.TaskError) as caught:
+            self.runner.tick()
+        self.assertIn('不唯一', str(caught.exception))
+        self.assertIn('失望（正面）', str(caught.exception))
+        self.assertEqual(sum(c[0] == 'fake-claude' for c in self.runner.calls), 0)
+        # A tail that two cells answer to is just as ambiguous as two cells that share a prefix.
+        with self.assertRaises(daily.TaskError):
+            daily.slot(self.guide(['好笑', '篇好笑']), '整篇好笑（其他）')
+        # One-character cells are never tails: 「失望」 must not land in a cell called 「望」.
+        with self.assertRaises(daily.TaskError):
+            daily.slot(self.guide(['望']), '失望（怒）')
+
+    def test_a_missing_cell_stops_before_claude_writes(self):
+        self.rewrite(LEDGER.replace('失望（怒）', '整篇好笑（其他）'),
+                     self.guide(['好奇／天真', '安宁／幸福']))
+        with self.assertRaises(daily.TaskError) as caught:
+            self.runner.tick()
+        self.assertIn('找不到情绪格子', str(caught.exception))
+        self.assertIn('整篇好笑', str(caught.exception))
+        self.assertIn('好奇／天真', str(caught.exception))  # the nearest thing a human could rename
+        # Nothing was spent and nothing was touched: no generation, no job, no ledger rollover.
+        self.assertEqual(sum(c[0] == 'fake-claude' for c in self.runner.calls), 0)
+        self.assertFalse((self.state / 'jobs/2026-09-08.json').exists())
+        self.assertIn('- [ ] 整篇好笑（其他）', (self.repo / 'ROTATION.md').read_text())
+        self.assertEqual(self.runner.changes(), set())
+        self.assertEqual([key for key, _ in self.alerts], ['job-2026-09-08'])  # a human hears about it
+
+    def test_audit_names_every_entry_that_could_not_register(self):
+        guide = self.guide(['失望（等的人没来）', '安宁／幸福'])
+        self.assertEqual(daily.audit(LEDGER, guide), {})
+        broken = daily.audit(LEDGER.replace('安宁／幸福（喜）', '整篇好笑（其他）'), guide)
+        self.assertEqual(list(broken), ['整篇好笑（其他）'])
 
     def test_generation_failure_never_generates_again(self):
         self.runner.generation_failure = True

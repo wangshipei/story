@@ -22,6 +22,7 @@ STATE = Path.home() / 'Library/Application Support/story-daily'
 # The task works in its own detached worktree so the user's checkout can never race it.
 REPO = Path(os.environ.get('STORY_REPO') or STATE / 'worktree')
 STORY = re.compile(r'^\d{3}-.+\.md$')
+CELL = re.compile(r'^- \*\*([^*\n]+)\*\*.*$', re.M)  # 「- **好笑**——…」: one cell of CLAUDE.md「情绪的谱」
 JOB = re.compile(r'^\d{4}-\d{2}-\d{2}$')  # Only date-named files are jobs; anything else in jobs/ is ignored.
 # Alerts run this checkout's sender, next to this file: a broken worktree must still be able to speak.
 SENDER = SOURCE / 'cron/wechat_send.py'
@@ -87,6 +88,73 @@ def rotation(text):
     if not all(categories) or categories[0][1] == categories[1][1]:
         raise TaskError('轮值前两条必须属于不同大类，请先调整 ROTATION.md')
     return picks, text
+
+
+def short_name(emotion):
+    """A rotation entry without its category suffix: 「整篇好笑（其他）」 -> 「整篇好笑」."""
+    return re.sub(r'（[^（）]+）$', '', emotion).strip()
+
+
+def cells(guide):
+    """Every emotion cell of CLAUDE.md, as (name, start, end) spans of the text given.
+
+    Only 「情绪的谱」 is read, so a bold bullet living elsewhere in CLAUDE.md can never be taken for
+    a cell; a CLAUDE.md without that heading falls back to the whole document, as before.
+    """
+    head = re.search(r'^## 情绪的谱.*$', guide, re.M)
+    body, offset = guide, 0
+    if head:
+        offset = head.end()
+        body = guide[offset:]
+        tail = re.search(r'^## ', body, re.M)
+        if tail:
+            body = body[:tail.start()]
+    return [(m[1], offset + m.start(), offset + m.end()) for m in CELL.finditer(body)]
+
+
+def slot(guide, emotion):
+    """The one cell a rotation entry registers into, as (name, start, end). Never guesses.
+
+    Both names are hand-written and drift apart: the entry carries its category
+    (「整篇好笑（其他）」) and is sometimes a longer way of saying the cell (「整篇好笑」 for the cell
+    「好笑」). Three rules are tried in order, and each must hit exactly one cell:
+      1. same name                            「安宁／幸福」 -> 「安宁／幸福」
+      2. the cell name starts with the entry  「失望」       -> 「失望（等的人没来／…）」
+      3. the cell name ends the entry name    「整篇好笑」   -> 「好笑」, cell name at least 2 characters
+    Nothing looser: no similarity scores, no substring in the middle, no one-character tails. Two
+    hits stops the day exactly like none — a story registered in the wrong cell is worse than a day
+    that waits for a human, and the message below has to be enough to fix the right side by hand.
+    """
+    short = short_name(emotion)
+    found = cells(guide)
+    for rule, hits in (('同名', [c for c in found if c[0] == short]),
+                       ('格子名以条目名开头', [c for c in found if c[0].startswith(short)]),
+                       ('格子名是条目名的结尾', [c for c in found if len(c[0]) > 1 and short.endswith(c[0])])):
+        if len(hits) == 1:
+            return hits[0]
+        if hits:
+            raise TaskError(f'情绪格子不唯一：ROTATION.md 的「{emotion}」按「{rule}」在 CLAUDE.md'
+                            f'「情绪的谱」里命中 {len(hits)} 个格子（{"、".join(h[0] for h in hits)}）；'
+                            '请把两边改成一一对应')
+    # Nearby means only「名字里有相同的字」, and the parenthetical gloss of a cell does not count:
+    # enough to point a human at the line to rename, never enough to rename it for them.
+    near = '、'.join([c[0] for c in found if set(c[0].split('（')[0]) & set(short)][:5])
+    raise TaskError(f'找不到情绪格子：ROTATION.md 的「{emotion}」去掉大类按「{short}」找，'
+                    f'CLAUDE.md「情绪的谱」的 {len(found)} 个格子里没有一个同名、以它开头或作它的结尾'
+                    + (f'；字面沾边的有：{near}' if near else '')
+                    + '。把格子改成同名，或让条目以格子名结尾')
+
+
+def audit(ledger, guide):
+    """Rotation entries CLAUDE.md cannot answer for, as {entry: reason}; empty means every day can register."""
+    block = re.search(r'<!-- 轮值顺序 -->(.*?)<!-- 轮值顺序结束 -->', ledger, re.S)
+    problems = {}
+    for entry in re.findall(r'^- (.+)$', block[1], re.M) if block else []:
+        try:
+            slot(guide, entry)
+        except TaskError as exc:
+            problems[entry] = str(exc)
+    return problems
 
 
 def environment():
@@ -297,19 +365,25 @@ class Runner:
                                         lambda _: mark, text, count=1, flags=re.M)
                 if not replaced:
                     raise TaskError(f'轮值登记不一致：{emotion}')
-            short = re.sub(r'（[^（）]+）$', '', emotion)
-            pattern = r'^- \*\*' + re.escape(short) + r'.*$'
-            entry = re.search(pattern, guide, re.M)
-            if not entry:
-                raise TaskError(f'找不到情绪格子：{emotion}')
-            if f'《{title}》' not in entry[0]:
-                guide = guide[:entry.start()] + entry[0] + f'；《{title}》' + guide[entry.end():]
+            short = short_name(emotion)
+            cell, begin, end = slot(guide, emotion)  # start() proved this resolves before Claude wrote
+            line = guide[begin:end]
+            if f'《{title}》' not in line:
+                guide = guide[:begin] + line + f'；《{title}》' + guide[end:]
             # Remove a completed emotion from the selection pool if Claude missed it.
             pool = re.search(r'(### 待写清单[^\n]*\n)(.*?)(?=\n## |\Z)', guide, re.S)
             if pool:
-                choices = pool[2].strip().split(' · ')
-                remaining = [choice for choice in choices
-                             if choice.strip() not in {short, short + '（正面）'}]
+                choices, remaining = pool[2].strip().split(' · '), []
+                for choice in choices:
+                    label = choice.strip()
+                    if label in {short, short + '（正面）'}:
+                        continue
+                    try:
+                        if slot(guide, label)[0] == cell:
+                            continue  # the pool spells the same cell another way (「倦怠」 for 「倦怠／厌倦」)
+                    except TaskError:
+                        pass  # free text belonging to no cell: leave the pool exactly as it is
+                    remaining.append(choice)
                 if remaining != choices:
                     guide = guide[:pool.start(2)] + '\n' + ' · '.join(remaining) + '\n' + guide[pool.end(2):]
         path.write_text(text, encoding='utf-8')
@@ -326,7 +400,17 @@ class Runner:
         self.git('reset', '--hard', 'origin/main')
         if self.changes():
             raise TaskError('同步 origin/main 后工作区不干净')
-        picks, ledger = rotation((self.repo / 'ROTATION.md').read_text(encoding='utf-8'))
+        text = (self.repo / 'ROTATION.md').read_text(encoding='utf-8')
+        guide = (self.repo / 'CLAUDE.md').read_text(encoding='utf-8')
+        picks, ledger = rotation(text)
+        # Registering happens after the writing, so a cell that cannot be found used to cost a whole
+        # day: two finished stories, an hour of Claude, and a task that failed at the last step.
+        # Resolve today's two cells first, on the same rules register() will use, and stop here.
+        for emotion in picks:
+            slot(guide, emotion)
+        later = {e: why for e, why in audit(text, guide).items() if e not in picks}
+        if later:  # the rest of the ledger is a warning, not a stop: those days are not today's
+            report(f'轮值表另有 {len(later)} 条在 CLAUDE.md 找不到唯一格子，轮到那天会停下：' + '、'.join(later))
         job = dict(date=self.day, status='generating', delivery='pending', delivery_format='images', picks=picks,
                    repo=str(self.repo), before=self.files(), base_head=self.git('rev-parse', 'HEAD'))
         self.record(job)  # Intent precedes any generation; a crash must never write again.
@@ -600,8 +684,13 @@ def main(argv=None):
     if args.dry_run:
         # Dry runs create nothing: read the ledger from the source checkout until the worktree exists.
         ledger = REPO if (REPO / 'ROTATION.md').is_file() else SOURCE
-        picks, _ = rotation((ledger / 'ROTATION.md').read_text(encoding='utf-8'))
+        text = (ledger / 'ROTATION.md').read_text(encoding='utf-8')
+        picks, _ = rotation(text)
         print('下一次轮到：' + ' ／ '.join(picks))
+        # The preview is also the cheapest place to see which entries would stop a morning.
+        if (ledger / 'CLAUDE.md').is_file():
+            for entry, why in audit(text, (ledger / 'CLAUDE.md').read_text(encoding='utf-8')).items():
+                report(f'轮值表「{entry}」还登记不了：{why}')
         return 0
     try:
         with locked(STATE) as acquired:
