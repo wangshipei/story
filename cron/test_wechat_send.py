@@ -24,6 +24,11 @@ def tiny_png():
             + chunk(b"IEND", b""))
 
 
+def doctor_report(*missing):
+    return {"ok": not missing,
+            "checks": [{"id": key, "ok": key not in missing} for key in sorted(sender.REQUIRED_CHECKS)]}
+
+
 class WeChatSendTests(unittest.TestCase):
     def test_png_validation_rejects_corruption_and_non_images(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -107,6 +112,50 @@ class WeChatSendTests(unittest.TestCase):
         ):
             with self.assertRaises(sender.SendError):
                 sender.ready(["wxmac"])
+
+    def test_closed_window_is_reopened_once_before_giving_up(self):
+        for first, second, healed in [
+            (doctor_report("wechat_window", "window_frame"), doctor_report(), True),
+            (doctor_report("wechat_window"), doctor_report("wechat_window"), False),
+        ]:
+            with self.subTest(healed=healed), \
+                 patch.object(sender, "REOPEN_SETTLE_SECONDS", 0), \
+                 patch.object(sender, "unlocked"), \
+                 patch.object(sender.subprocess, "run") as osascript, \
+                 patch.object(sender, "command_json", side_effect=[first, second]) as doctor:
+                if healed:
+                    sender.ready(["wxmac"])
+                else:
+                    with self.assertRaises(sender.SendError) as caught:
+                        sender.ready(["wxmac"])
+                    self.assertEqual(caught.exception.code, 75)
+                    self.assertIn("wechat_window", str(caught.exception))
+                osascript.assert_called_once()
+                self.assertEqual(osascript.call_args.args[0][0], "/usr/bin/osascript")
+                self.assertEqual(doctor.call_count, 2)
+
+    def test_stopped_wechat_or_missing_permission_is_never_reopened(self):
+        for report in [doctor_report("wechat_running", "wechat_window", "window_frame"),
+                       doctor_report("accessibility", "wechat_window"),
+                       doctor_report("screen_recording")]:
+            with self.subTest(report=report), \
+                 patch.object(sender, "unlocked"), \
+                 patch.object(sender.subprocess, "run") as osascript, \
+                 patch.object(sender, "command_json", return_value=report) as doctor:
+                with self.assertRaises(sender.SendError) as caught:
+                    sender.ready(["wxmac"])
+                self.assertEqual(caught.exception.code, 75)
+                osascript.assert_not_called()
+                self.assertEqual(doctor.call_count, 1)
+
+    def test_reopen_failure_only_falls_through_to_the_second_check(self):
+        with patch.object(sender, "REOPEN_SETTLE_SECONDS", 0), patch.object(sender, "unlocked"), \
+             patch.object(sender.subprocess, "run",
+                          side_effect=subprocess.TimeoutExpired("osascript", 15)) as osascript, \
+             patch.object(sender, "command_json",
+                          side_effect=[doctor_report("wechat_window"), doctor_report()]):
+            sender.ready(["wxmac"])
+            osascript.assert_called_once()
 
     def test_recipient_mismatch_never_sends(self):
         with tempfile.TemporaryDirectory() as directory:

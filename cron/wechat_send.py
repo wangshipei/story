@@ -18,7 +18,14 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zlib
+
+
+REQUIRED_CHECKS = {"accessibility", "screen_recording", "wechat_running", "wechat_window", "window_frame"}
+# The only failures a reopen can fix: WeChat keeps running after its window is closed.
+WINDOW_CHECKS = {"wechat_window", "window_frame"}
+REOPEN_SETTLE_SECONDS = 3
 
 
 class SendError(Exception):
@@ -78,16 +85,40 @@ def command_json(command, *arguments, allow_failure=False):
     return data
 
 
-def ready(command):
-    unlocked()
-    data = command_json(command, "doctor", allow_failure=True)
+def missing_checks(data):
+    """Recording is optional in wxmac, but mandatory here to verify the recipient."""
     checks = data.get("checks", [])
     if not isinstance(checks, list):
         raise SendError("wxmac doctor returned invalid checks")
     passed = {check.get("id") for check in checks
               if isinstance(check, dict) and check.get("ok") is True}
-    # Recording is optional in wxmac, but mandatory here to verify the recipient.
-    missing = {"accessibility", "screen_recording", "wechat_running", "wechat_window", "window_frame"} - passed
+    return REQUIRED_CHECKS - passed
+
+
+def reopen_window():
+    """Reopen the closed main window of an already running WeChat; never raise."""
+    try:
+        subprocess.run(
+            ["/usr/bin/osascript",
+             "-e", 'tell application "WeChat" to reopen',
+             "-e", 'tell application "WeChat" to activate'],
+            capture_output=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+    time.sleep(REOPEN_SETTLE_SECONDS)
+
+
+def ready(command):
+    unlocked()
+    data = command_json(command, "doctor", allow_failure=True)
+    missing = missing_checks(data)
+    # Only a window subset is healed here: it means wechat_running and accessibility
+    # already passed, so WeChat is up with its window closed. Try that once.
+    if missing and missing <= WINDOW_CHECKS:
+        reopen_window()
+        data = command_json(command, "doctor", allow_failure=True)
+        missing = missing_checks(data)
     if missing:
         raise SendError("WeChat readiness checks failed: " + ", ".join(sorted(missing)))
     if data.get("ok") is not True:
