@@ -96,12 +96,14 @@ def missing_checks(data):
 
 
 def reopen_window():
-    """Reopen the closed main window of an already running WeChat; never raise."""
+    """Reopen the closed main window of an already running WeChat; never raise.
+
+    AppleScript `tell application "WeChat" to reopen/activate` exits 0 on this Mac
+    and does nothing at all: WeChat ignores it. `open -b` does reopen the window.
+    """
     try:
         subprocess.run(
-            ["/usr/bin/osascript",
-             "-e", 'tell application "WeChat" to reopen',
-             "-e", 'tell application "WeChat" to activate'],
+            ["/usr/bin/open", "-b", "com.tencent.xinWeChat"],
             capture_output=True, timeout=15,
         )
     except (OSError, subprocess.SubprocessError):
@@ -114,13 +116,17 @@ def ready(command):
     data = command_json(command, "doctor", allow_failure=True)
     missing = missing_checks(data)
     # Only a window subset is healed here: it means wechat_running and accessibility
-    # already passed, so WeChat is up with its window closed. Try that once.
+    # already passed, so WeChat is up with its window closed (⌘W). Try that once.
     if missing and missing <= WINDOW_CHECKS:
         reopen_window()
         data = command_json(command, "doctor", allow_failure=True)
         missing = missing_checks(data)
     if missing:
-        raise SendError("WeChat readiness checks failed: " + ", ".join(sorted(missing)))
+        # Carry each doctor detail: the log has to say why, not just which check.
+        details = {check.get("id"): " ".join(str(check.get("detail")).split())
+                   for check in data.get("checks", []) if isinstance(check, dict) and check.get("detail")}
+        raise SendError("WeChat readiness checks failed: " + ", ".join(
+            name + (f" ({details[name]})" if details.get(name) else "") for name in sorted(missing)))
     if data.get("ok") is not True:
         raise SendError("wxmac doctor reported an additional readiness failure")
 

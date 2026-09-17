@@ -24,9 +24,17 @@ def tiny_png():
             + chunk(b"IEND", b""))
 
 
-def doctor_report(*missing):
+CLOSED = "WindowNotFound: WeChat has no windows (not logged in, or hidden)"
+REOPEN = ["/usr/bin/open", "-b", "com.tencent.xinWeChat"]
+REOPEN_KWARGS = {"capture_output": True, "timeout": 15}
+
+
+def doctor_report(*missing, detail=CLOSED):
+    """What `wxmac doctor` prints; a failed check carries the reason, a passed one does not."""
     return {"ok": not missing,
-            "checks": [{"id": key, "ok": key not in missing} for key in sorted(sender.REQUIRED_CHECKS)]}
+            "checks": [dict({"id": key, "ok": key not in missing},
+                            **({"detail": detail} if key in missing and detail else {}))
+                       for key in sorted(sender.REQUIRED_CHECKS)]}
 
 
 class WeChatSendTests(unittest.TestCase):
@@ -121,7 +129,7 @@ class WeChatSendTests(unittest.TestCase):
             with self.subTest(healed=healed), \
                  patch.object(sender, "REOPEN_SETTLE_SECONDS", 0), \
                  patch.object(sender, "unlocked"), \
-                 patch.object(sender.subprocess, "run") as osascript, \
+                 patch.object(sender.subprocess, "run") as reopen, \
                  patch.object(sender, "command_json", side_effect=[first, second]) as doctor:
                 if healed:
                     sender.ready(["wxmac"])
@@ -130,8 +138,9 @@ class WeChatSendTests(unittest.TestCase):
                         sender.ready(["wxmac"])
                     self.assertEqual(caught.exception.code, 75)
                     self.assertIn("wechat_window", str(caught.exception))
-                osascript.assert_called_once()
-                self.assertEqual(osascript.call_args.args[0][0], "/usr/bin/osascript")
+                reopen.assert_called_once()
+                self.assertEqual(reopen.call_args.args[0], REOPEN)
+                self.assertEqual(reopen.call_args.kwargs, REOPEN_KWARGS)
                 self.assertEqual(doctor.call_count, 2)
 
     def test_stopped_wechat_or_missing_permission_is_never_reopened(self):
@@ -140,22 +149,53 @@ class WeChatSendTests(unittest.TestCase):
                        doctor_report("screen_recording")]:
             with self.subTest(report=report), \
                  patch.object(sender, "unlocked"), \
-                 patch.object(sender.subprocess, "run") as osascript, \
+                 patch.object(sender.subprocess, "run") as reopen, \
                  patch.object(sender, "command_json", return_value=report) as doctor:
                 with self.assertRaises(sender.SendError) as caught:
                     sender.ready(["wxmac"])
                 self.assertEqual(caught.exception.code, 75)
-                osascript.assert_not_called()
+                reopen.assert_not_called()
                 self.assertEqual(doctor.call_count, 1)
 
     def test_reopen_failure_only_falls_through_to_the_second_check(self):
         with patch.object(sender, "REOPEN_SETTLE_SECONDS", 0), patch.object(sender, "unlocked"), \
              patch.object(sender.subprocess, "run",
-                          side_effect=subprocess.TimeoutExpired("osascript", 15)) as osascript, \
+                          side_effect=subprocess.TimeoutExpired("open", 15)) as reopen, \
              patch.object(sender, "command_json",
                           side_effect=[doctor_report("wechat_window"), doctor_report()]):
             sender.ready(["wxmac"])
-            osascript.assert_called_once()
+            reopen.assert_called_once()
+            self.assertEqual(reopen.call_args.args[0], REOPEN)
+            self.assertEqual(reopen.call_args.kwargs, REOPEN_KWARGS)
+
+    def test_failure_message_carries_the_doctor_detail(self):
+        # The log has to say why, not just which check failed.
+        report = {"ok": False, "checks": [
+            {"id": "accessibility", "ok": True},
+            {"id": "screen_recording", "ok": True},
+            {"id": "wechat_running", "ok": True},
+            {"id": "wechat_window", "ok": False, "detail": CLOSED},
+            {"id": "window_frame", "ok": False, "detail": "  skipped\n"},
+        ]}
+        with patch.object(sender, "REOPEN_SETTLE_SECONDS", 0), patch.object(sender, "unlocked"), \
+             patch.object(sender.subprocess, "run") as reopen, \
+             patch.object(sender, "command_json", side_effect=[report, report]):
+            with self.assertRaises(sender.SendError) as caught:
+                sender.ready(["wxmac"])
+        reopen.assert_called_once()
+        self.assertEqual(str(caught.exception),
+                         f"WeChat readiness checks failed: wechat_window ({CLOSED}), window_frame (skipped)")
+        self.assertEqual(caught.exception.code, 75)
+
+    def test_checks_without_detail_are_reported_bare(self):
+        with patch.object(sender, "REOPEN_SETTLE_SECONDS", 0), patch.object(sender, "unlocked"), \
+             patch.object(sender.subprocess, "run"), \
+             patch.object(sender, "command_json",
+                          return_value=doctor_report("wechat_window", detail=None)):
+            with self.assertRaises(sender.SendError) as caught:
+                sender.ready(["wxmac"])
+        self.assertEqual(str(caught.exception), "WeChat readiness checks failed: wechat_window")
+        self.assertEqual(caught.exception.code, 75)
 
     def test_recipient_mismatch_never_sends(self):
         with tempfile.TemporaryDirectory() as directory:
