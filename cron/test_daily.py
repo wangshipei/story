@@ -78,7 +78,7 @@ class DailyTests(unittest.TestCase):
         self.state.mkdir()
         (self.source / 'site').mkdir()
         (self.source / 'ROTATION.md').write_text(LEDGER)
-        (self.source / 'CLAUDE.md').write_text(
+        (self.source / 'AGENTS.md').write_text(
             self.guide(['失望（等的人没来）', '安宁／幸福'], '失望 · 安宁／幸福 · 骄傲（正面）'))
         (self.source / '001-旧.md').write_text('# 旧\n旧故事')
         (self.source / 'site/stories.js').write_text('old')
@@ -104,13 +104,13 @@ class DailyTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
     def guide(self, cells, pool='骄傲（正面）'):
-        """A CLAUDE.md holding only the emotion cells a test cares about, plus the selection pool."""
+        """A AGENTS.md holding only the emotion cells a test cares about, plus the selection pool."""
         return (''.join(f'- **{name}**——待写。\n' for name in cells)
                 + f'### 待写清单（选题池）\n\n{pool}\n\n## 下节\n')
 
     def rewrite(self, ledger=None, guide=None):
-        """Hand-edit ROTATION.md / CLAUDE.md on origin/main, where the worktree will reset onto them."""
-        for name, text in (('ROTATION.md', ledger), ('CLAUDE.md', guide)):
+        """Hand-edit ROTATION.md / AGENTS.md on origin/main, where the worktree will reset onto them."""
+        for name, text in (('ROTATION.md', ledger), ('AGENTS.md', guide)):
             if text is not None:
                 (self.source / name).write_text(text)
         for args in [('add', '.'), ('commit', '-m', 'edit'), ('push', 'origin', 'main')]:
@@ -169,14 +169,14 @@ class DailyTests(unittest.TestCase):
         with self.assertRaises(daily.TaskError):
             daily.rotation(LEDGER.replace('（喜）', '（怒）'))
 
-    # The ledger names an emotion its own way; CLAUDE.md keeps the cell. The two must still meet.
+    # The ledger names an emotion its own way; AGENTS.md keeps the cell. The two must still meet.
 
     def test_a_longer_entry_name_registers_in_its_cell(self):
         self.rewrite(LEDGER.replace('失望（怒）', '整篇好笑（其他）'),
                      self.guide(['好笑', '好奇／天真', '安宁／幸福'], '整篇好笑 · 安宁／幸福 · 骄傲（正面）'))
         with self.sender(0):
             self.runner.tick()
-        guide = (self.repo / 'CLAUDE.md').read_text()
+        guide = (self.repo / 'AGENTS.md').read_text()
         self.assertIn('- **好笑**——待写。；《门》', guide)  # 「整篇好笑」 is the cell 「好笑」 spelled long
         self.assertNotIn('《门》', guide.split('- **好奇／天真**')[1])
         self.assertIn('- [x] 整篇好笑（其他） → 2026-09-08 002《门》', (self.repo / 'ROTATION.md').read_text())
@@ -251,8 +251,8 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(sum(c == ['node', 'cron/render_share.mjs'] for c in self.runner.calls), 1)
         self.assertEqual(sum(c[0] == 'fake-claude' for c in self.runner.calls), 1)
         self.assertIn('2026-09-08 002《门》', (self.repo / 'ROTATION.md').read_text())
-        self.assertIn('《窗》', (self.repo / 'CLAUDE.md').read_text())
-        self.assertIn('清单（选题池）\n\n骄傲（正面）', (self.repo / 'CLAUDE.md').read_text())
+        self.assertIn('《窗》', (self.repo / 'AGENTS.md').read_text())
+        self.assertIn('清单（选题池）\n\n骄傲（正面）', (self.repo / 'AGENTS.md').read_text())
         self.assertEqual(self.runner.changes(), set())
 
     def test_foreign_file_in_jobs_dir_does_not_block_the_day(self):
@@ -321,7 +321,7 @@ class DailyTests(unittest.TestCase):
         job.update(status='published', delivery='pending', delivery_format='images')
         self.runner.record(job)
         # A later code/docs change must not block rerendering a published story.
-        with (self.repo / 'CLAUDE.md').open('a') as stream:
+        with (self.repo / 'AGENTS.md').open('a') as stream:
             stream.write('Updated delivery instructions\n')
         with self.sender(0) as send:
             self.runner.tick()
@@ -511,7 +511,7 @@ class DailyTests(unittest.TestCase):
 
     def test_local_edits_after_generation_are_not_committed(self):
         job = self.runner.start()
-        with (self.repo / 'CLAUDE.md').open('a') as stream:
+        with (self.repo / 'AGENTS.md').open('a') as stream:
             stream.write('User editing while automation is paused\n')
         with self.assertRaises(daily.TaskError):
             self.runner.publish(job)

@@ -22,7 +22,7 @@ STATE = Path.home() / 'Library/Application Support/story-daily'
 # The task works in its own detached worktree so the user's checkout can never race it.
 REPO = Path(os.environ.get('STORY_REPO') or STATE / 'worktree')
 STORY = re.compile(r'^\d{3}-.+\.md$')
-CELL = re.compile(r'^- \*\*([^*\n]+)\*\*.*$', re.M)  # 「- **好笑**——…」: one cell of CLAUDE.md「情绪的谱」
+CELL = re.compile(r'^- \*\*([^*\n]+)\*\*.*$', re.M)  # 「- **好笑**——…」: one cell of AGENTS.md「情绪的谱」
 JOB = re.compile(r'^\d{4}-\d{2}-\d{2}$')  # Only date-named files are jobs; anything else in jobs/ is ignored.
 # Alerts run this checkout's sender, next to this file: a broken worktree must still be able to speak.
 SENDER = SOURCE / 'cron/wechat_send.py'
@@ -96,10 +96,10 @@ def short_name(emotion):
 
 
 def cells(guide):
-    """Every emotion cell of CLAUDE.md, as (name, start, end) spans of the text given.
+    """Every emotion cell of AGENTS.md, as (name, start, end) spans of the text given.
 
-    Only 「情绪的谱」 is read, so a bold bullet living elsewhere in CLAUDE.md can never be taken for
-    a cell; a CLAUDE.md without that heading falls back to the whole document, as before.
+    Only 「情绪的谱」 is read, so a bold bullet living elsewhere in AGENTS.md can never be taken for
+    a cell; a AGENTS.md without that heading falls back to the whole document, as before.
     """
     head = re.search(r'^## 情绪的谱.*$', guide, re.M)
     body, offset = guide, 0
@@ -133,20 +133,20 @@ def slot(guide, emotion):
         if len(hits) == 1:
             return hits[0]
         if hits:
-            raise TaskError(f'情绪格子不唯一：ROTATION.md 的「{emotion}」按「{rule}」在 CLAUDE.md'
+            raise TaskError(f'情绪格子不唯一：ROTATION.md 的「{emotion}」按「{rule}」在 AGENTS.md'
                             f'「情绪的谱」里命中 {len(hits)} 个格子（{"、".join(h[0] for h in hits)}）；'
                             '请把两边改成一一对应')
     # Nearby means only「名字里有相同的字」, and the parenthetical gloss of a cell does not count:
     # enough to point a human at the line to rename, never enough to rename it for them.
     near = '、'.join([c[0] for c in found if set(c[0].split('（')[0]) & set(short)][:5])
     raise TaskError(f'找不到情绪格子：ROTATION.md 的「{emotion}」去掉大类按「{short}」找，'
-                    f'CLAUDE.md「情绪的谱」的 {len(found)} 个格子里没有一个同名、以它开头或作它的结尾'
+                    f'AGENTS.md「情绪的谱」的 {len(found)} 个格子里没有一个同名、以它开头或作它的结尾'
                     + (f'；字面沾边的有：{near}' if near else '')
                     + '。把格子改成同名，或让条目以格子名结尾')
 
 
 def audit(ledger, guide):
-    """Rotation entries CLAUDE.md cannot answer for, as {entry: reason}; empty means every day can register."""
+    """Rotation entries AGENTS.md cannot answer for, as {entry: reason}; empty means every day can register."""
     block = re.search(r'<!-- 轮值顺序 -->(.*?)<!-- 轮值顺序结束 -->', ledger, re.S)
     problems = {}
     for entry in re.findall(r'^- (.+)$', block[1], re.M) if block else []:
@@ -291,17 +291,17 @@ def bootstrap(repo, env, source=None):
 
 
 def prompt(picks, day):
-    return f'''你在微小说集《照常》的仓库里。先完整读 CLAUDE.md，再读 001–004 四篇范本和序号最大的三篇找语感。
+    return f'''你在微小说集《照常》的仓库里。先完整读 AGENTS.md，再读 001–004 四篇范本和序号最大的三篇找语感。
 今天写且只写两篇新篇，主情绪由 ROTATION.md 指定，不要换：
 - 第一篇：{picks[0]}
 - 第二篇：{picks[1]}
 要求：
-1. 每篇动笔前，按 CLAUDE.md「动笔前三问」用大白话回答（在输出里，不进正文）；答不出就换事，不换情绪。按「情绪的谱」找压强来源和身体从哪漏。主副情绪先选定，交稿时删掉草稿标记。
+1. 每篇动笔前，按 AGENTS.md「动笔前三问」用大白话回答（在输出里，不进正文）；答不出就换事，不换情绪。按「情绪的谱」找压强来源和身体从哪漏。主副情绪先选定，交稿时删掉草稿标记。
 2. 严格守全部写作规范：正文以200字为准、180–220字含标点（贴着上限写就是塞了第二场戏，先删场不删字）、直角引号、第一人称、一场戏、没人哭也没人笑出声、有「照常」一句、结尾落在画面上、标题是短名词。文件名NNN-标题.md，序号当前最大+1、+2，首行「# 标题」。只新增两篇，不改已有小说。
 3. 先列标题，再搜索拟用核心物件，题材、人物关系、核心物件不要和已有篇目撞车。
 4. 自查这篇让读者替谁疼（或松一口气）、在哪一句，答不上回炉。复述检验：用一句大白话复述谁、因为什么、结果；每个事实正文必须给实，缺了补白描，不补解释。出过什么事、机制怎么卡住人的前提用一句人话坐实；事件不直写、情绪不点破。赌注必须是人、命、家、一辈子；叙述者也被碾到；身体先于纸面，爱是燃料。注意既有连作共享事实。
-5. ROTATION.md把对应两条未写项分别登记为「- [x] 情绪 → {day} NNN《标题》」；CLAUDE.md情绪的谱对应格子补篇名，写过的从待写清单移除。
-6. 只允许改两篇新文件、ROTATION.md、CLAUDE.md。不要commit、push、deploy、发微信、调用其他自动化或改定时任务，外层脚本会做。
+5. ROTATION.md把对应两条未写项分别登记为「- [x] 情绪 → {day} NNN《标题》」；AGENTS.md情绪的谱对应格子补篇名，写过的从待写清单移除。
+6. 只允许改两篇新文件、ROTATION.md、AGENTS.md。不要commit、push、deploy、发微信、调用其他自动化或改定时任务，外层脚本会做。
 7. 最后输出每篇主副情绪、哪几笔留白、对比怎么搭。'''
 
 
@@ -347,7 +347,7 @@ class Runner:
                     or body.count('「') != body.count('」')
                     or re.search(r'^\s*#|^\s*```', body, re.M)):
                 raise TaskError(f'{name} 格式、字数或写作硬性规格未通过；请人工检查')
-        allowed = set(new) | {'CLAUDE.md', 'ROTATION.md'}
+        allowed = set(new) | {'AGENTS.md', 'ROTATION.md'}
         if self.changes() - allowed:
             raise TaskError('Claude 修改了允许范围外的文件；请人工检查')
         return new
@@ -355,7 +355,7 @@ class Runner:
     def register(self, job):
         path = self.repo / 'ROTATION.md'
         text = path.read_text(encoding='utf-8')
-        rules = self.repo / 'CLAUDE.md'
+        rules = self.repo / 'AGENTS.md'
         guide = rules.read_text(encoding='utf-8')
         for emotion, name in zip(job['picks'], job['files']):
             title, number = name[4:-3], name[:3]
@@ -401,7 +401,7 @@ class Runner:
         if self.changes():
             raise TaskError('同步 origin/main 后工作区不干净')
         text = (self.repo / 'ROTATION.md').read_text(encoding='utf-8')
-        guide = (self.repo / 'CLAUDE.md').read_text(encoding='utf-8')
+        guide = (self.repo / 'AGENTS.md').read_text(encoding='utf-8')
         picks, ledger = rotation(text)
         # Registering happens after the writing, so a cell that cannot be found used to cost a whole
         # day: two finished stories, an hour of Claude, and a task that failed at the last step.
@@ -410,7 +410,7 @@ class Runner:
             slot(guide, emotion)
         later = {e: why for e, why in audit(text, guide).items() if e not in picks}
         if later:  # the rest of the ledger is a warning, not a stop: those days are not today's
-            report(f'轮值表另有 {len(later)} 条在 CLAUDE.md 找不到唯一格子，轮到那天会停下：' + '、'.join(later))
+            report(f'轮值表另有 {len(later)} 条在 AGENTS.md 找不到唯一格子，轮到那天会停下：' + '、'.join(later))
         job = dict(date=self.day, status='generating', delivery='pending', delivery_format='images', picks=picks,
                    repo=str(self.repo), before=self.files(), base_head=self.git('rev-parse', 'HEAD'))
         self.record(job)  # Intent precedes any generation; a crash must never write again.
@@ -426,7 +426,7 @@ class Runner:
             job['files'] = self.validate(job)
             self.register(job)
             job['hashes'] = {name: hashlib.sha256((self.repo / name).read_bytes()).hexdigest()
-                             for name in job['files'] + ['CLAUDE.md', 'ROTATION.md']}
+                             for name in job['files'] + ['AGENTS.md', 'ROTATION.md']}
             message = f'《照常》每日两篇 · {self.day}\n\n' + '\n\n'.join(
                 (self.repo / name).read_text(encoding='utf-8').strip() for name in job['files'])
             message_path = self.state / 'jobs' / (self.day + '.txt')
@@ -444,7 +444,7 @@ class Runner:
         for name, digest in job['hashes'].items():
             if hashlib.sha256((self.repo / name).read_bytes()).hexdigest() != digest:
                 raise TaskError('待发布文件已被改动；请人工检查状态与正文')
-        allowed = set(job['files']) | {'CLAUDE.md', 'ROTATION.md', 'site/stories.js'}
+        allowed = set(job['files']) | {'AGENTS.md', 'ROTATION.md', 'site/stories.js'}
         if job['status'] == 'generated':
             if self.changes() - allowed or self.git('rev-parse', 'HEAD') != job['base_head']:
                 raise TaskError('生成后仓库已被其他工作修改；请人工检查')
@@ -688,8 +688,8 @@ def main(argv=None):
         picks, _ = rotation(text)
         print('下一次轮到：' + ' ／ '.join(picks))
         # The preview is also the cheapest place to see which entries would stop a morning.
-        if (ledger / 'CLAUDE.md').is_file():
-            for entry, why in audit(text, (ledger / 'CLAUDE.md').read_text(encoding='utf-8')).items():
+        if (ledger / 'AGENTS.md').is_file():
+            for entry, why in audit(text, (ledger / 'AGENTS.md').read_text(encoding='utf-8')).items():
                 report(f'轮值表「{entry}」还登记不了：{why}')
         return 0
     try:
