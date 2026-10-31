@@ -24,6 +24,7 @@ const stories = files.map(f => {
 const SERIES = [
   { name: '成年人的浪漫', label: '连作 · 四篇', titles: ['成年人的浪漫', '名字', '备注', '怕冷'] },
   { name: '彩礼', label: '连作 · 四篇', titles: ['彩礼', '嫁妆', '零头', '礼簿'] },
+  { name: '桂花', label: '连作 · 两篇', titles: ['桂花', '签字'] },
 ];
 let ordered = stories;
 for (const ser of SERIES) {
